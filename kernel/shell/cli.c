@@ -42,14 +42,88 @@ static int cli_cmd_tcphandshake(CliSession *session, const ParsedCommand *cmd) {
     ip = (a << 24) | (b << 16) | (c << 8) | d;
     if (cli_streq(cmd->argv[1], "connect")) {
         int sock = tcp_connect(ip, port);
-        cli_printf("tcp_connect returned %d\n", sock);
+        if (sock < 0) {
+            cli_printf("no free TCP socket\n");
+            return 1;
+        }
+        cli_printf("sock %d: SYN sent, waiting for handshake...\n", sock);
+        extern uint32_t get_kernel_tick(void);
+        uint32_t start = get_kernel_tick();
+        while (get_kernel_tick() - start < 240 * 5) { // ~5s at 240Hz
+            TcpState s = g_tcbs[sock].state;
+            if (s == TCP_ESTABLISHED || s == TCP_CLOSED) break;
+            __asm__ volatile("hlt");
+        }
+        cli_printf("sock %d state: %s\n", sock, tcp_state_name(g_tcbs[sock].state));
     } else if (cli_streq(cmd->argv[1], "listen")) {
         int sock = tcp_listen(port);
-        cli_printf("tcp_listen returned %d\n", sock);
+        if (sock < 0) {
+            cli_printf("no free TCP socket\n");
+            return 1;
+        }
+        cli_printf("sock %d: listening on port %u\n", sock, port);
     } else {
         cli_printf("Unknown subcommand\n");
         return 1;
     }
+    return 0;
+}
+
+static int cli_cmd_tcpsend(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 3) {
+        cli_printf("Usage: tcpsend <sock> <text...>\n");
+        return 1;
+    }
+    int sock = simple_atoi(cmd->argv[1]);
+    char buf[256];
+    int len = 0;
+    for (int i = 2; i < cmd->argc && len < (int)sizeof(buf) - 1; i++) {
+        if (i > 2) buf[len++] = ' ';
+        for (const char *p = cmd->argv[i]; *p && len < (int)sizeof(buf) - 1; p++)
+            buf[len++] = *p;
+    }
+    buf[len++] = '\n';
+    int n = tcp_send(sock, buf, len);
+    if (n < 0) cli_printf("tcpsend: socket not connected\n");
+    else cli_printf("sent %d bytes\n", n);
+    return n < 0 ? 1 : 0;
+}
+
+static int cli_cmd_tcprecv(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 2) {
+        cli_printf("Usage: tcprecv <sock>\n");
+        return 1;
+    }
+    int sock = simple_atoi(cmd->argv[1]);
+    char buf[257];
+    int n = tcp_recv(sock, buf, 256);
+    if (n < 0) {
+        cli_printf("tcprecv: connection closed\n");
+        return 1;
+    }
+    if (n == 0) {
+        cli_printf("(no data)\n");
+        return 0;
+    }
+    buf[n] = 0;
+    cli_printf("%s", buf);
+    return 0;
+}
+
+static int cli_cmd_tcpclose(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 2) {
+        cli_printf("Usage: tcpclose <sock>\n");
+        return 1;
+    }
+    int sock = simple_atoi(cmd->argv[1]);
+    if (tcp_close(sock) < 0) {
+        cli_printf("tcpclose: bad socket\n");
+        return 1;
+    }
+    cli_printf("sock %d: %s\n", sock, tcp_state_name(g_tcbs[sock].state));
     return 0;
 }
 
@@ -337,6 +411,9 @@ static const CliBuiltinCommand BUILTIN_COMMANDS[] = {
     { "sync",     "Flush block cache",        cli_cmd_sync,     CLI_PRIV_USER  },
     { "tcphandshake", "Test TCP handshake",    cli_cmd_tcphandshake, CLI_PRIV_USER },
     { "tcpstat",  "Show TCP sockets",         cli_cmd_tcpstat,  CLI_PRIV_USER  },
+    { "tcpsend",  "Send data on TCP socket",  cli_cmd_tcpsend,  CLI_PRIV_USER  },
+    { "tcprecv",  "Read data from TCP socket", cli_cmd_tcprecv, CLI_PRIV_USER  },
+    { "tcpclose", "Close TCP socket",         cli_cmd_tcpclose, CLI_PRIV_USER  },
 };
 
 // TCP status command implementation now inlined above

@@ -118,7 +118,7 @@ Rust build: `cargo +nightly build -Zbuild-std=core,alloc -Zjson-target-spec --ta
 | `kernel/fs/` | `vfs.c`, `vernisfs.c`, `bcache.c` | VFS layer, native FS, LRU block cache |
 | `kernel/fs/` | `fat32.c`, `ext2.c`, `ntfs.c` | **Stubs only** — 3-line files, not implemented |
 | `kernel/security/` | `policy_loader.c`, `policy_enforce.c`, `sandbox.c`, `userdb.c`, `sha256.c`, `auditlog.c` | Full security stack |
-| `kernel/net/` | `tcp.c` | **Partial** — state machine only; send/recv/checksum/ISN not implemented |
+| `kernel/net/` | `tcp.c` | Handshake/data/close + RFC 793 checksum work (Phase 49); no sliding window or data retransmit |
 | `kernel/ipc/` | `ipc.c` | Mailbox + Unix socket layer |
 | `kernel/shell/` | `cli.c` | ~30 built-in commands, pipe support |
 | `kernel/module/` | `module.c`, `dylib.c` | Dynamic module loading |
@@ -142,7 +142,11 @@ VernisFS on disk (sector-based, 32 files max)
 
 ### Network / E1000
 
-The Intel E1000 (82540EM) driver lives entirely in `kernel/arch/x86_64/kernel_x64.c` as static functions (`e1000_send()`, `e1000_recv()`). It handles ARP and ICMP (ping) in-kernel. TCP (`kernel/net/tcp.c`) currently has no path to call `e1000_send` — the integration point is not wired. To complete TCP, expose `e1000_send`/`e1000_recv` via a small non-static wrapper and call `tcp_receive_packet()` from the E1000 rx poll loop (around line 4020 of `kernel_x64.c`).
+The Intel E1000 (82540EM) driver lives in each arch's kernel file (`kernel/arch/x86_64/kernel_x64.c` and `kernel/arch/x86/kernel_x86.c`) as static functions (`e1000_send()`, `e1000_recv()`). The timer IRQ (240Hz) calls `net_rx_poll()`, which drains the RX ring into `net_dispatch_frame()` — ARP, ICMP echo replies (ping waits on `g_icmp_echo_seq`), and TCP (`tcp_receive_packet()`).
+
+TCP (`kernel/net/tcp.c`) is arch-agnostic: the kernel registers `net_tcp_ip_output()` via `tcp_set_output()` at boot. That transmit path is non-blocking — on ARP cache miss it drops the segment and fires an ARP request; handshake retransmission (`tcp_tick()`, also timer-IRQ) covers the loss. Never call the blocking `net_arp_resolve()` from IRQ context. TCP covers handshake, data (`tcp_send`/`tcp_recv`, 1KB rx buffer per socket), teardown, and RFC 793 checksum; still missing: sliding window, data retransmission, out-of-order reassembly, UDP/DHCP/DNS.
+
+Serial console: the timer IRQ also polls COM1 RX into the kernel CLI keyboard buffer, so `-serial stdio` (plus `-vga none` to force VGA-text CLI mode instead of the GUI) drives the shell — this is how the integration tests interact with the OS. CLI test commands: `tcphandshake connect <ip> <port>`, `tcpsend`, `tcprecv`, `tcpstat`, `tcpclose`.
 
 ### AI Integration
 
@@ -177,8 +181,8 @@ All intermediate files go under `make/` (not committed):
 
 | Subsystem | Location | Status |
 |-----------|----------|--------|
-| TCP send/recv | `kernel/net/tcp.c` | State machine only; 9 TODO comments; not wired to E1000 |
-| TCP checksum | `kernel/net/tcp.c:9` | Returns 0 (RFC 793 not implemented) |
+| TCP extras | `kernel/net/tcp.c` | Core works (handshake/data/close, checksum); no sliding window, data retransmit, OOO reassembly |
+| UDP / DHCP / DNS | — | Not implemented |
 | FAT32 driver | `kernel/fs/fat32.c` | 3-line stub — ignore STATUS.md claim |
 | ext2 driver | `kernel/fs/ext2.c` | 3-line stub |
 | NTFS driver | `kernel/fs/ntfs.c` | 3-line stub |

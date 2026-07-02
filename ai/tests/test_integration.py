@@ -84,6 +84,7 @@ class QemuSession:
             '-drive', f'format=raw,file={self.img_path}',
             '-serial', 'stdio',
             '-display', 'none',
+            '-vga', 'none',
             '-no-reboot',
             '-no-shutdown',
             '-m', '64M',
@@ -110,7 +111,7 @@ class QemuSession:
         while time.time() < deadline:
             ready, _, _ = select.select([self.proc.stdout], [], [], 0.1)
             if ready:
-                chunk = self.proc.stdout.read1(4096).decode('utf-8', errors='replace')
+                chunk = os.read(self.proc.stdout.fileno(), 4096).decode('utf-8', errors='replace')
                 buf += chunk
                 if pattern in buf:
                     self.output_buf = buf
@@ -126,7 +127,7 @@ class QemuSession:
         while time.time() < deadline:
             ready, _, _ = select.select([self.proc.stdout], [], [], 0.1)
             if ready:
-                chunk = self.proc.stdout.read1(4096).decode('utf-8', errors='replace')
+                chunk = os.read(self.proc.stdout.fileno(), 4096).decode('utf-8', errors='replace')
                 buf += chunk
         self.output_buf = buf
         return buf

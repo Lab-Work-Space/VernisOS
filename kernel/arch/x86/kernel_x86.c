@@ -115,18 +115,10 @@ static void terminal_setcolor(uint8_t color) { terminal_color = color; }
 // =============================================================================
 // TCP Stack Integration (Phase 49)
 // =============================================================================
+// tcp_init() + tcp_set_output() are called from kernel_main after the E1000
+// comes up; net_rx_poll() + tcp_tick() run from the timer IRQ.
 
-// Called at kernel init
-__attribute__((constructor))
-static void kernel_tcp_init(void) {
-    tcp_init();
-}
-
-// Called from timer IRQ (should be called at 240Hz)
-void kernel_tick_hook(void) {
-    bcache_tick();
-    tcp_tick();
-}
+static void net_rx_poll(void);
 
 static void terminal_scroll(void) {
     for (size_t y = 0; y < VGA_HEIGHT - 1; y++)
@@ -811,6 +803,19 @@ static void keyboard_irq_handler(void) {
     if (c) tty_push_char_32(&kernel_tty0_32, c);
 }
 
+// Serial console input: poll COM1 RX and inject ASCII into the kernel CLI
+// keyboard buffer, so `-serial stdio` works as a console for headless use
+// and integration tests. Deliberately not fed to the TTY: the user shell
+// (vsh) reads TTY stdin and would consume/echo the same bytes.
+static void serial_console_rx_poll(void) {
+    while (inb(COM1 + 5) & 0x01) {
+        char c = (char)inb(COM1);
+        if (c == '\r') c = '\n';
+        if (c == 127) c = '\b';
+        kbd.buf[kbd.write_pos++] = c;
+    }
+}
+
 // In GUI mode, keyboard IRQs are routed to GUI event handling.
 // Mirror a minimal set of control keys into the CLI buffer so commands that
 // poll keyboard_read_char() (like `ps` realtime) can still exit.
@@ -1455,6 +1460,13 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
 
         // Phase 48: periodic dirty-block writeback
         bcache_tick();
+
+        // Phase 49: network rx poll + TCP timers (polling driver, IRQ-safe)
+        net_rx_poll();
+        tcp_tick();
+
+        // Serial console: poll COM1 RX into keyboard/TTY input
+        serial_console_rx_poll();
 
         // Phase 18: preemptive context switch (pure C, no Rust calls)
         if (context_switch_enabled && current_task_idx >= 0) {
@@ -3471,6 +3483,9 @@ static uint8_t net_ip[4]  = {10, 0, 2, 15};
 static uint8_t net_gw[4]  = {10, 0, 2, 2};
 static uint8_t net_bcast_mac[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
+// Last ICMP echo-reply seq seen by net_rx_poll (ping waits on this)
+static volatile uint16_t g_icmp_echo_seq = 0;
+
 #define NET_ARP_CACHE 8
 typedef struct { uint8_t ip[4]; uint8_t mac[6]; uint8_t valid; } ArpEntry;
 static ArpEntry arp_cache[NET_ARP_CACHE];
@@ -3526,6 +3541,17 @@ static void net_send_arp_request(const uint8_t *target_ip) {
     e1000_send(pkt, sizeof(pkt));
 }
 
+static void net_arp_cache_insert(const uint8_t *ip, const uint8_t *mac) {
+    for (int i = 0; i < NET_ARP_CACHE; i++) {
+        if (!arp_cache[i].valid || ip_eq(arp_cache[i].ip, ip)) {
+            mcpy(arp_cache[i].ip, ip, 4);
+            mcpy(arp_cache[i].mac, mac, 6);
+            arp_cache[i].valid = 1;
+            return;
+        }
+    }
+}
+
 static void net_handle_arp(const uint8_t *data, int len) {
     if (len < 28) return;
     const ArpPkt *arp = (const ArpPkt *)data;
@@ -3541,34 +3567,26 @@ static void net_handle_arp(const uint8_t *data, int len) {
         e1000_send(pkt, sizeof(pkt));
     }
     if (ntohs(arp->oper) == 2) {
-        for (int i = 0; i < NET_ARP_CACHE; i++) {
-            if (!arp_cache[i].valid || ip_eq(arp_cache[i].ip, arp->spa)) {
-                mcpy(arp_cache[i].ip, arp->spa, 4);
-                mcpy(arp_cache[i].mac, arp->sha, 6);
-                arp_cache[i].valid = 1;
-                return;
-            }
-        }
+        net_arp_cache_insert(arp->spa, arp->sha);
     }
 }
 
-static int net_arp_resolve(const uint8_t *ip, uint8_t *mac_out) {
+static int net_arp_lookup(const uint8_t *ip, uint8_t *mac_out) {
     for (int i = 0; i < NET_ARP_CACHE; i++)
         if (arp_cache[i].valid && ip_eq(arp_cache[i].ip, ip))
             { mcpy(mac_out, arp_cache[i].mac, 6); return 0; }
+    return -1;
+}
+
+// Blocking resolve — CLI context only (IRQs on; timer IRQ runs net_rx_poll
+// which fills the cache). Never call from IRQ context.
+static int net_arp_resolve(const uint8_t *ip, uint8_t *mac_out) {
+    if (net_arp_lookup(ip, mac_out) == 0) return 0;
     net_send_arp_request(ip);
-    uint8_t buf[E1000_PKT_SIZE];
     uint32_t start = kernel_tick;
     uint32_t last_arp = start;
     while ((kernel_tick - start) < (TIMER_HZ * 5)) {
-        int n = e1000_recv(buf, sizeof(buf));
-        if (n >= 14) {
-            EthHdr *eth = (EthHdr *)buf;
-            if (ntohs(eth->ethertype) == 0x0806) net_handle_arp(buf + 14, n - 14);
-        }
-        for (int i = 0; i < NET_ARP_CACHE; i++)
-            if (arp_cache[i].valid && ip_eq(arp_cache[i].ip, ip))
-                { mcpy(mac_out, arp_cache[i].mac, 6); return 0; }
+        if (net_arp_lookup(ip, mac_out) == 0) return 0;
         if ((kernel_tick - last_arp) >= TIMER_HZ) {
             net_send_arp_request(ip);
             last_arp = kernel_tick;
@@ -3595,28 +3613,90 @@ static int net_ping_one(const uint8_t *dst_ip, const uint8_t *dst_mac, uint16_t 
     icmp->ident = htons(0x1234); icmp->seq = htons(seq);
     for (int i = 0; i < 32; i++) payload[i] = (uint8_t)i;
     icmp->checksum = ip_checksum(icmp, 8 + 32);
+    g_icmp_echo_seq = 0;
     e1000_send(pkt, sizeof(pkt));
 
-    uint8_t buf[E1000_PKT_SIZE];
+    // Wait for echo reply (3s timeout); the timer-IRQ net_rx_poll()
+    // dispatches the reply and records its sequence number.
     uint32_t start = kernel_tick;
     while ((kernel_tick - start) < (TIMER_HZ * 3)) {
-        int n = e1000_recv(buf, sizeof(buf));
-        if (n >= 14) {
-            EthHdr *re = (EthHdr *)buf;
-            uint16_t etype = ntohs(re->ethertype);
-            if (etype == 0x0806) { net_handle_arp(buf + 14, n - 14); continue; }
-            if (etype == 0x0800 && n >= 14 + 20 + 8) {
-                Ipv4Hdr *ri = (Ipv4Hdr *)(buf + 14);
-                if (ri->protocol == 1) {
-                    IcmpHdr *rc = (IcmpHdr *)(buf + 14 + 20);
-                    if (rc->type == 0 && ntohs(rc->seq) == seq) return 1;
-                }
-            }
-        }
+        if (g_icmp_echo_seq == seq) return 1;
         __asm__ volatile("hlt");
     }
     return 0;
 }
+
+// =============================================================================
+// Phase 49: RX dispatch (timer IRQ) + TCP IP-layer glue
+// =============================================================================
+
+static void net_dispatch_frame(uint8_t *buf, int n) {
+    if (n < 14) return;
+    EthHdr *eth = (EthHdr *)buf;
+    uint16_t etype = ntohs(eth->ethertype);
+    if (etype == 0x0806) { net_handle_arp(buf + 14, n - 14); return; }
+    if (etype != 0x0800 || n < 14 + 20) return;
+    Ipv4Hdr *ip = (Ipv4Hdr *)(buf + 14);
+    int ihl = (ip->ihl_ver & 0x0F) * 4;
+    if (ihl < 20 || 14 + ihl > n) return;
+    int tot = ntohs(ip->total_len);
+    if (tot < ihl || 14 + tot > n) tot = n - 14; // clamp to received bytes
+    // Learn sender MAC so TCP replies never need a blocking ARP resolve
+    net_arp_cache_insert(ip->src, eth->src);
+    if (ip->protocol == 1 && tot >= ihl + 8) {
+        IcmpHdr *ic = (IcmpHdr *)(buf + 14 + ihl);
+        if (ic->type == 0) g_icmp_echo_seq = ntohs(ic->seq);
+    } else if (ip->protocol == 6) {
+        uint32_t sip = ((uint32_t)ip->src[0] << 24) | ((uint32_t)ip->src[1] << 16) |
+                       ((uint32_t)ip->src[2] << 8)  | ip->src[3];
+        uint32_t dip = ((uint32_t)ip->dst[0] << 24) | ((uint32_t)ip->dst[1] << 16) |
+                       ((uint32_t)ip->dst[2] << 8)  | ip->dst[3];
+        tcp_receive_packet(sip, dip, buf + 14 + ihl, tot - ihl);
+    }
+}
+
+// Timer IRQ context: drain the RX ring. Single-threaded (IRQs don't nest
+// here), so a static frame buffer is safe.
+static void net_rx_poll(void) {
+    static uint8_t frame[E1000_PKT_SIZE];
+    if (!e1000_up) return;
+    for (int k = 0; k < E1000_NUM_RX; k++) {
+        int n = e1000_recv(frame, sizeof(frame));
+        if (n <= 0) break;
+        net_dispatch_frame(frame, n);
+    }
+}
+
+// TCP segment transmit for tcp.c. Non-blocking: on ARP cache miss the
+// segment is dropped and an ARP request fired — TCP retransmission covers it.
+static int net_tcp_ip_output(uint32_t dst_ip, const void *seg, int len) {
+    static uint8_t pkt[14 + 20 + TCP_MAX_SEG + 20];
+    if (!e1000_up || len < 0 || len > TCP_MAX_SEG + 20) return -1;
+    uint8_t dip[4] = { (uint8_t)(dst_ip >> 24), (uint8_t)(dst_ip >> 16),
+                       (uint8_t)(dst_ip >> 8),  (uint8_t)dst_ip };
+    // Next hop: on-link if same /24 as us, else the gateway
+    const uint8_t *hop = (dip[0] == net_ip[0] && dip[1] == net_ip[1] &&
+                          dip[2] == net_ip[2]) ? dip : net_gw;
+    uint8_t mac[6];
+    if (net_arp_lookup(hop, mac) < 0) {
+        net_send_arp_request(hop);
+        return -1;
+    }
+    EthHdr *eth = (EthHdr *)pkt;
+    Ipv4Hdr *ip = (Ipv4Hdr *)(pkt + 14);
+    mcpy(eth->dst, mac, 6); mcpy(eth->src, e1000_mac, 6);
+    eth->ethertype = htons(0x0800);
+    ip->ihl_ver = 0x45; ip->tos = 0; ip->total_len = htons((uint16_t)(20 + len));
+    ip->ident = htons((uint16_t)kernel_tick); ip->frag_off = 0;
+    ip->ttl = 64; ip->protocol = 6;
+    ip->checksum = 0; mcpy(ip->src, net_ip, 4); mcpy(ip->dst, dip, 4);
+    ip->checksum = ip_checksum(ip, 20);
+    mcpy(pkt + 14 + 20, seg, len);
+    return e1000_send(pkt, (uint16_t)(14 + 20 + len));
+}
+
+// TCP's clock source (x64 defines this next to kernel_tick; x86 was missing it)
+uint32_t get_kernel_tick(void) { return kernel_tick; }
 
 int kernel_net_available(void) { return e1000_up; }
 void kernel_net_get_ip(uint8_t *out) { mcpy(out, net_ip, 4); }
@@ -4020,6 +4100,15 @@ void kernel_main(void) {
         if (pr > 0) serial_print("[phase22] ping OK\n");
         else if (pr == -2) serial_print("[phase22] ARP failed\n");
         else serial_print("[phase22] ICMP timeout\n");
+    }
+
+    // Phase 49: TCP stack init + IP-layer transmit hookup
+    tcp_init();
+    if (e1000_up) {
+        uint32_t lip = ((uint32_t)net_ip[0] << 24) | ((uint32_t)net_ip[1] << 16) |
+                       ((uint32_t)net_ip[2] << 8)  | net_ip[3];
+        tcp_set_output(net_tcp_ip_output, lip);
+        serial_print("[phase49] TCP stack ready\n");
     }
 
     // Clear boot messages before starting interactive shell

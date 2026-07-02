@@ -67,7 +67,7 @@
 | 13 | **AHCI / NVMe Driver** | ✅ AHCI+NVMe เชื่อม KFS — auto-detect priority: NVMe > AHCI > ATA PIO, pluggable disk I/O | สูง |
 | 14 | **USB Stack** | ❌ ยังไม่ทำ — ไม่มีโค้ด xHCI ใน repo (audit 2026-07-02) | สูง |
 | 15 | **Framebuffer GUI** | ✅ ทำงานแล้ว — 1024×768×24-bit double buffering, Rust windowed GUI layer | กลาง |
-| 16 | **Network Stack** | ⚠️ บางส่วน — E1000 + ARP + IPv4 + ICMP ทำงานแล้ว; TCP มีแค่ skeleton (kernel/net/tcp.c, 9 TODO, checksum คืน 0, ยังไม่ต่อกับ E1000); UDP/DHCP/DNS ไม่มีโค้ด | สูง |
+| 16 | **Network Stack** | ⚠️ บางส่วน — E1000 + ARP + IPv4 + ICMP + TCP ทำงานแล้ว (Phase 49: handshake/send/recv/close ทดสอบ end-to-end กับ host จริงทั้ง x86+x64); UDP/DHCP/DNS ยังไม่มีโค้ด | สูง |
 | 17 | **AC97 / Intel HDA Audio** | ❌ ยังไม่ทำ — ไม่มีโค้ด AC97/HDA ใน repo | กลาง |
 | 18 | **FAT32 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/fat32.c เป็น stub 3 บรรทัด | กลาง |
 | 19 | **Multiuser (getty/login)** | ✅ ทำงานแล้ว — /sbin/getty + /bin/login, setuid/setgid, home dirs | สูง |
@@ -450,13 +450,20 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ `sync` CLI command: shows blocks flushed + hit/miss/writeback/eviction stats
       └─ Build status: x86 ✅, x64 ✅, os.img (4.0M) ✅
 
-    Phase 49: TCP Stack ⬜ PLANNED
-      └─ TCP state machine (CLOSED→LISTEN→SYN_SENT→ESTABLISHED→FIN_WAIT→...)
-      └─ 3-way handshake (SYN/SYN-ACK/ACK)
-      └─ Sequence number tracking, sliding window
-      └─ Retransmission timer (basic)
-      └─ TCP checksum calculation
-      └─ Kernel socket struct (TCB)
+    Phase 49: TCP Stack ✅ DONE (2026-07-02)
+      └─ TCP state machine: full handshake + data + teardown (FIN/RST) transitions
+      └─ 3-way handshake (SYN/SYN-ACK/ACK) — active + passive open
+      └─ RFC 793 checksum (pseudo-header) — validated against real host stacks
+      └─ Timer-based ISN; handshake retransmission (~0.5s, 5 tries) via tcp_tick @240Hz
+      └─ Data path: tcp_send (PSH|ACK), tcp_recv (1KB rx buffer per TCB), in-order ACK
+      └─ Wired to E1000 both arches: timer-IRQ net_rx_poll() dispatches ARP/ICMP/TCP;
+         tcp_set_output() registers non-blocking IP transmit (ARP-miss → drop + retransmit)
+      └─ ping refactored onto shared rx dispatcher (no more inline rx drains)
+      └─ Serial console added: COM1 RX → CLI keyboard buffer (headless/integration tests)
+      └─ CLI: tcphandshake connect/listen (waits for ESTABLISHED), tcpsend, tcprecv,
+         tcpstat, tcpclose
+      └─ Verified end-to-end vs host echo server via QEMU slirp (10.0.2.2): 11/11 both arches
+      └─ ยังไม่ทำ: sliding window, data retransmission, out-of-order reassembly, TIME_WAIT
 
     Phase 50: UDP + Socket Layer ⬜ PLANNED
       └─ UDP send/receive (stateless, checksum optional)
