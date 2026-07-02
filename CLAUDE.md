@@ -101,9 +101,10 @@ Key Rust FFI groups declared in `kernel/arch/x86_64/kernel_x64.c`:
 - `scheduler.rs` — round-robin preemptive scheduler, PCB, priority, signals
 - `memory.rs` — buddy system heap allocator (`buddy_system_allocator` crate), 8MB heap
 - `syscall.rs` — Rust-side syscall dispatch helpers
-- `console.rs`, `framebuffer.rs` — VGA text + 1024×768×24bpp double-buffered GUI
+- `console.rs`, `framebuffer.rs` — VGA text + auto-resolution double-buffered GUI (bootloader scans the VBE mode list, picks the largest 32/24bpp LFB mode ≤ 2.1Mpx — 1920×1080×32 under QEMU)
 - `ai/` — 8 modules: EventStore, AnomalyDetector, ProcessTracker, AlertDeduplicator, ResponseHandler, AutoTuner, PolicyEngine
-- `gui/` — compositor, window manager, terminal widget, cursor, widgets (240Hz render loop)
+- `gui/` — glassmorphism compositor (real backdrop blur: separable box blur + alpha tint + color-key content blit), window manager, terminal widget, cursor, widgets; render cadence follows the kernel timer (240Hz)
+- GUI back buffer is NOT heap-allocated: it lives in a fixed identity-mapped region at 48MB (16MB budget, `BACK_BUFFER_PHYS` in `compositor.rs`) because the buddy allocator would round a ~8MB buffer up past what the 8MB kernel heap can hold. Do not enlarge `HEAP_SIZE`: BSS end + the frame-allocator pool must stay below the 0xF00000 kernel stack
 - `module_registry.rs` — kernel module registry
 
 Rust build: `cargo +nightly build -Zbuild-std=core,alloc -Zjson-target-spec --target i386.json` (x86); x64 uses `x86_64-unknown-none` with `RUSTFLAGS="-C no-redzone=yes"`. Only run `make rust` when `kernel/core/verniskernel/src/` changes — it runs `cargo clean` first.

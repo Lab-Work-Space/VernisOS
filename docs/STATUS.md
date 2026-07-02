@@ -30,7 +30,7 @@
 | Security | Policy enforcement, audit log, kernel log (klog) | 13 |
 | Self-Test | Boot-time validation of subsystems | 14 |
 | Module Registry | Dynamic kernel module register/unregister | 6 |
-| Framebuffer GUI | 1024×768×24-bit double buffering, Rust windowed GUI layer | 24 |
+| Framebuffer GUI | Auto-resolution (VBE scan, up to 1920×1080×32), glassmorphism compositor, Rust windowed GUI layer | 24, 61 |
 | Network Stack | E1000 driver, ARP+IPv4+ICMP, PCI enumeration, user commands | 22 |
 | Process Signals | PCB signal_pending, signal delivery, POSIX priority | 23 |
 
@@ -66,14 +66,14 @@
 | 12 | **VFS Abstraction Layer** | ✅ เริ่มใช้งานแล้ว — เพิ่ม `kfs_*` abstraction layer ครอบ VernisFS และย้าย syscall/CLI/userdb/ELF loader ไปใช้ผ่านชั้นกลาง | กลาง |
 | 13 | **AHCI / NVMe Driver** | ✅ AHCI+NVMe เชื่อม KFS — auto-detect priority: NVMe > AHCI > ATA PIO, pluggable disk I/O | สูง |
 | 14 | **USB Stack** | ❌ ยังไม่ทำ — ไม่มีโค้ด xHCI ใน repo (audit 2026-07-02) | สูง |
-| 15 | **Framebuffer GUI** | ✅ ทำงานแล้ว — 1024×768×24-bit double buffering, Rust windowed GUI layer | กลาง |
+| 15 | **Framebuffer GUI** | ✅ ทำงานแล้ว — auto-resolution (สูงสุด 1920×1080×32) + glassmorphism UI (Phase 61) | กลาง |
 | 16 | **Network Stack** | ⚠️ บางส่วน — E1000 + ARP + IPv4 + ICMP + TCP ทำงานแล้ว (Phase 49: handshake/send/recv/close ทดสอบ end-to-end กับ host จริงทั้ง x86+x64); UDP/DHCP/DNS ยังไม่มีโค้ด | สูง |
 | 17 | **AC97 / Intel HDA Audio** | ❌ ยังไม่ทำ — ไม่มีโค้ด AC97/HDA ใน repo | กลาง |
 | 18 | **FAT32 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/fat32.c เป็น stub 3 บรรทัด | กลาง |
 | 19 | **Multiuser (getty/login)** | ✅ ทำงานแล้ว — /sbin/getty + /bin/login, setuid/setgid, home dirs | สูง |
 | 21 | **ext2 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ext2.c เป็น stub 3 บรรทัด | กลาง |
 | 22 | **NTFS Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ntfs.c เป็น stub 3 บรรทัด | กลาง |
-| 15 | **Framebuffer Graphics / GUI** | ✅ ทำงานแล้ว — 1024×768×24bpp double-buffered GUI ที่ 240fps, cursor-only fast path, dirty rect tracking | กลาง |
+| 15 | **Framebuffer Graphics / GUI** | ✅ ทำงานแล้ว — auto-res double-buffered GUI, cursor-only fast path, dirty rect tracking; glassmorphism ทำให้ full compose ต่อ event (ดู Phase 61) | กลาง |
 | 23 | **Performance Optimization** | ❌ ยังไม่ทำ — ไม่พบ run queue bitmap ใน scheduler.rs และไม่มี `perf` CLI command | กลาง |
 | 16 | **ACPI / Power Management** | ✅ ทำงานแล้ว — เพิ่ม ACPI-lite driver (RSDP/RSDT/FADT/DSDT `_S5_`) สำหรับ `shutdown`/`restart` พร้อม reset-register และ QEMU fallback | กลาง |
 | 17 | **Pipes / Unix Sockets** | ✅ ทำงานแล้ว — shell pipeline `|` + local Unix-socket layer (`ipc_usock_*`) บน IPC channels พร้อม CLI (`usockbind/usocksend/usockrecv/usockclose`) | กลาง |
@@ -563,6 +563,25 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ umount CLI command
       └─ mkfs CLI command (stub for future formatting)
       └─ /dev/audio already exists from Phase 58
+
+    Phase 61: Glassmorphism UI + Auto Resolution ✅ DONE (2026-07-02)
+      └─ Bootloader (stage2 x86 + stage3 x64): VBE mode-list scan แทน fixed mode 0x118
+        └─ เลือก mode ความละเอียดสูงสุดที่เป็น 32/24bpp + linear framebuffer + direct color
+        └─ Cap ที่ 2,100,000 pixels (รองรับ 1920×1080); QEMU เลือก 1920×1080×32
+        └─ Fallback: ไม่เจอ mode → text mode (integration tests ใช้ -vga none ได้เหมือนเดิม)
+      └─ Compositor back buffer ย้ายออกจาก Rust heap → fixed region 48MB (16MB budget)
+        └─ เหตุผล: buddy allocator ปัดขึ้น power-of-2 → buffer ~8MB ต้องใช้ block 8-16MB ซึ่ง heap 8MB ให้ไม่ได้
+        └─ หมายเหตุ: HEAP_SIZE ต้องคง 8MB — BSS + frame pool ต้องอยู่ใต้ kernel stack (0xF00000)
+      └─ Glassmorphism (software, ทั้ง x86 + x64):
+        └─ compositor_blur_rect(): separable box blur (sliding-window sums) — frosted backdrop จริง
+        └─ compositor_fill_rect_alpha() + blend_px(): glass tint / edge highlight / title strip
+        └─ compositor_blit_colorkey(): terminal cell พื้นดำ = โปร่งใส มองทะลุถึง glass
+        └─ Wallpaper: vertical gradient + soft accent blobs (จำเป็น — blur บนสีพื้นเรียบจะมองไม่เห็น)
+        └─ Taskbar: blurred glass strip + hairline highlight
+      └─ Auto Hz: render cadence ตาม kernel timer (interval 1 tick) แทน GUI_TARGET_FPS คงที่
+      └─ Trade-off: ทุก event ต้อง full compose (glass ต้อง re-blur จาก wallpaper ที่วาดใหม่)
+        └─ cursor-only fast path ยังคงอยู่ (ไม่ compose)
+      └─ Verified: boot + help + typing ทั้ง x86/x64 ที่ 1920×1080 ผ่าน QEMU screendump
 
     Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — audit 2026-07-02: มี userlib/getty.c + login.c + Makefile rules + mkfs support จริง แต่ syscalls SETUID/GETUID/CHDIR/GETCWD/UMASK (79–85) ไม่มีใน kernel (syscall สูงสุดคือ SYS_SYNC=78)
       └─ /sbin/getty: display login prompt, fork + exec /bin/login

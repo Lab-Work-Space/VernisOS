@@ -22,17 +22,16 @@ static mut LAST_FRAME_TICK: u32 = 0;
 static mut LAST_CURSOR_X: i32 = -1;  // Cache cursor position to skip redundant renders
 static mut LAST_CURSOR_Y: i32 = -1;
 
-const GUI_TARGET_FPS: u32 = 240;  // Match kernel PIT@240Hz for smooth rendering (4.17ms per frame)
 const GUI_MAX_EVENTS_PER_TICK: usize = 64;
 
+// Auto Hz: render cadence follows the kernel timer — one frame opportunity
+// per tick, whatever frequency the PIT is programmed to (240Hz today).
+// Dirty-checks below keep idle ticks free.
 #[inline(always)]
 unsafe fn gui_frame_interval_ticks() -> u32 {
     let hz = kernel_get_timer_hz();
-    if hz == 0 {
-        return 1;
-    }
-    let interval = (hz + (GUI_TARGET_FPS - 1)) / GUI_TARGET_FPS;
-    if interval == 0 { 1 } else { interval }
+    if hz == 0 { return 1; }
+    1
 }
 
 /// Initialize all GUI subsystems.
@@ -155,19 +154,19 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
         return;
     }
 
-    // Render affected components only — don't always render background/taskbar!
-    // Background + Taskbar only needed when window layout changes, not for terminal output
-    if had_non_move_event || window::wm_windows_dirty() {
-        // Full composition when windows change
+    // Glassmorphism requires a full compose whenever anything changed:
+    // window glass is blurred/tinted from the wallpaper behind it, so the
+    // backdrop must be redrawn before windows re-blur it (re-blurring an
+    // already-composited frame would compound the blur each frame).
+    if had_non_move_event || window::wm_windows_dirty() || term_was_dirty {
         desktop::desktop_draw_background();
         window::wm_compose_all();
         desktop::desktop_draw_taskbar();
         window::wm_windows_rendered();
-    } else if !term_was_dirty {
+    } else {
         // No changes at all—this shouldn't happen (caught earlier), but safety check
         return;
     }
-    // Note: if only terminal_was_dirty, we skip background/taskbar (already rendered) and only render terminal
 
     // 5. Draw mouse cursor on top
     let mx = mouse::mouse_get_x();

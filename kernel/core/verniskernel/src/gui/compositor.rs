@@ -5,7 +5,17 @@ use core::ptr;
 use alloc::vec::Vec;
 
 use crate::font8x16::VGA_FONT_8X16;
-use crate::framebuffer::{FONT_WIDTH, FONT_HEIGHT, write_pixel_buf};
+use crate::framebuffer::{FONT_WIDTH, FONT_HEIGHT, write_pixel_buf, read_pixel_buf};
+
+/// Blend src over dst with alpha 0..=255 (per-channel, 0xRRGGBB colors).
+#[inline(always)]
+pub fn blend_px(dst: u32, src: u32, alpha: u32) -> u32 {
+    let inv = 255 - alpha;
+    let r = ((src >> 16 & 0xFF) * alpha + (dst >> 16 & 0xFF) * inv) / 255;
+    let g = ((src >> 8 & 0xFF) * alpha + (dst >> 8 & 0xFF) * inv) / 255;
+    let b = ((src & 0xFF) * alpha + (dst & 0xFF) * inv) / 255;
+    (r << 16) | (g << 8) | b
+}
 
 pub struct DirtyRect {
     pub x: i32,
@@ -40,8 +50,26 @@ impl DirtyRect {
     }
 }
 
+// The back buffer lives in a dedicated identity-mapped physical region, NOT
+// the Rust heap: the buddy allocator rounds allocations up to a power of two,
+// so a ~6-8MB buffer would demand an 8-16MB block the 8MB kernel heap can
+// never provide. Region: 48MB..64MB physical (16MB), far above the kernel
+// image/BSS (~9.3MB), the frame allocator pool (ends ~13.3MB), and the kernel
+// stack (15MB); well inside the 128MB identity map and the 64MB minimum RAM.
+const BACK_BUFFER_PHYS: usize = 0x0300_0000;
+const BACK_BUFFER_MAX: usize = 16 * 1024 * 1024;
+
+/// Raw-pointer back buffer with a Vec-like accessor surface.
+pub struct BackBuffer(pub *mut u8);
+impl BackBuffer {
+    #[inline(always)]
+    pub fn as_mut_ptr(&self) -> *mut u8 { self.0 }
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const u8 { self.0 }
+}
+
 pub struct Compositor {
-    pub back_buffer: Vec<u8>,
+    pub back_buffer: BackBuffer,
     pub width: u32,
     pub height: u32,
     pub pitch: u32,   // bytes per scanline in back buffer
@@ -52,7 +80,7 @@ pub struct Compositor {
 }
 
 static mut COMP: Compositor = Compositor {
-    back_buffer: Vec::new(),
+    back_buffer: BackBuffer(core::ptr::null_mut()),
     width: 0,
     height: 0,
     pitch: 0,
@@ -70,9 +98,12 @@ pub unsafe fn compositor_init(width: u32, height: u32, bpp: u32) {
     let bpp_bytes = bpp / 8;
     let pitch = width * bpp_bytes;
     let size = (pitch * height) as usize;
+    if size > BACK_BUFFER_MAX {
+        return; // mode too large for the reserved region — GUI stays off
+    }
 
-    COMP.back_buffer = Vec::with_capacity(size);
-    COMP.back_buffer.resize(size, 0);
+    COMP.back_buffer = BackBuffer(BACK_BUFFER_PHYS as *mut u8);
+    ptr::write_bytes(COMP.back_buffer.as_mut_ptr(), 0, size);
     COMP.width = width;
     COMP.height = height;
     COMP.pitch = pitch;
@@ -373,6 +404,216 @@ pub unsafe fn compositor_present() {
     
     COMP.dirty = false;
     COMP.dirty_rect = DirtyRect::new(0, 0, 0, 0);
+}
+
+// =============================================================================
+// Glassmorphism primitives — blur, alpha fill, color-key blit, transparent text
+// =============================================================================
+
+/// Clip helper: (x, y, w, h) in screen space -> (x0, y0, x1, y1) or None.
+unsafe fn clip_rect(x: i32, y: i32, w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    let x0 = if x < 0 { 0 } else { x as u32 };
+    let y0 = if y < 0 { 0 } else { y as u32 };
+    let x1 = {
+        let xe = x.saturating_add(w as i32);
+        if xe <= 0 { return None; }
+        (xe as u32).min(COMP.width)
+    };
+    let y1 = {
+        let ye = y.saturating_add(h as i32);
+        if ye <= 0 { return None; }
+        (ye as u32).min(COMP.height)
+    };
+    if x0 >= x1 || y0 >= y1 { return None; }
+    Some((x0, y0, x1, y1))
+}
+
+/// Scratch line buffer for the separable box blur (one row or column).
+static mut BLUR_SCRATCH: Vec<u32> = Vec::new();
+
+/// Box-blur a back-buffer region in place (separable: one horizontal +
+/// one vertical pass, sliding-window sums). This is what makes windows
+/// "frosted": call it on the backdrop before tinting the glass.
+pub unsafe fn compositor_blur_rect(x: i32, y: i32, w: u32, h: u32, radius: u32) {
+    if !COMP.initialized || radius == 0 {
+        return;
+    }
+    let Some((x0, y0, x1, y1)) = clip_rect(x, y, w, h) else { return; };
+    let rw = (x1 - x0) as usize;
+    let rh = (y1 - y0) as usize;
+    let r = radius as usize;
+    let bpp = COMP.bpp;
+    let bpp_bytes = (bpp / 8) as usize;
+    let buf = COMP.back_buffer.as_mut_ptr();
+    let pitch = COMP.pitch as usize;
+
+    let need = rw.max(rh);
+    if BLUR_SCRATCH.len() < need {
+        BLUR_SCRATCH.resize(need, 0);
+    }
+    let line = BLUR_SCRATCH.as_mut_ptr();
+
+    // Horizontal pass
+    for row in 0..rh {
+        let row_base = buf.add((y0 as usize + row) * pitch + x0 as usize * bpp_bytes);
+        for i in 0..rw {
+            *line.add(i) = read_pixel_buf(row_base.add(i * bpp_bytes), bpp);
+        }
+        let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+        let mut count = 0u32;
+        // Prime window [0, r]
+        for i in 0..=(r.min(rw - 1)) {
+            let p = *line.add(i);
+            sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
+            count += 1;
+        }
+        for i in 0..rw {
+            let out = ((sr / count) << 16) | ((sg / count) << 8) | (sb / count);
+            write_pixel_buf(row_base.add(i * bpp_bytes), out, bpp);
+            // Slide window: add i+r+1, remove i-r
+            let add_i = i + r + 1;
+            if add_i < rw {
+                let p = *line.add(add_i);
+                sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
+                count += 1;
+            }
+            if i >= r {
+                let p = *line.add(i - r);
+                sr -= p >> 16 & 0xFF; sg -= p >> 8 & 0xFF; sb -= p & 0xFF;
+                count -= 1;
+            }
+        }
+    }
+
+    // Vertical pass
+    for col in 0..rw {
+        let col_base = buf.add(y0 as usize * pitch + (x0 as usize + col) * bpp_bytes);
+        for i in 0..rh {
+            *line.add(i) = read_pixel_buf(col_base.add(i * pitch), bpp);
+        }
+        let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+        let mut count = 0u32;
+        for i in 0..=(r.min(rh - 1)) {
+            let p = *line.add(i);
+            sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
+            count += 1;
+        }
+        for i in 0..rh {
+            let out = ((sr / count) << 16) | ((sg / count) << 8) | (sb / count);
+            write_pixel_buf(col_base.add(i * pitch), out, bpp);
+            let add_i = i + r + 1;
+            if add_i < rh {
+                let p = *line.add(add_i);
+                sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
+                count += 1;
+            }
+            if i >= r {
+                let p = *line.add(i - r);
+                sr -= p >> 16 & 0xFF; sg -= p >> 8 & 0xFF; sb -= p & 0xFF;
+                count -= 1;
+            }
+        }
+    }
+
+    compositor_mark_dirty_rect(x, y, w, h);
+    COMP.dirty = true;
+}
+
+/// Alpha-blend a solid color over a back-buffer rect (the glass tint).
+pub unsafe fn compositor_fill_rect_alpha(x: i32, y: i32, w: u32, h: u32, color: u32, alpha: u32) {
+    if !COMP.initialized {
+        return;
+    }
+    let Some((x0, y0, x1, y1)) = clip_rect(x, y, w, h) else { return; };
+    let bpp = COMP.bpp;
+    let bpp_bytes = (bpp / 8) as usize;
+    let buf = COMP.back_buffer.as_mut_ptr();
+    for row in y0..y1 {
+        let row_base = buf.add((row * COMP.pitch) as usize + x0 as usize * bpp_bytes);
+        for col in 0..(x1 - x0) as usize {
+            let p = row_base.add(col * bpp_bytes);
+            let dst = read_pixel_buf(p, bpp);
+            write_pixel_buf(p, blend_px(dst, color, alpha), bpp);
+        }
+    }
+    compositor_mark_dirty_rect(x, y, w, h);
+    COMP.dirty = true;
+}
+
+/// Blit with a transparent color key: source pixels equal to `key` are
+/// skipped, letting the glass backdrop show through (terminal cell
+/// backgrounds are pure black = key).
+pub unsafe fn compositor_blit_colorkey(
+    src: *const u8,
+    dst_x: i32,
+    dst_y: i32,
+    w: u32,
+    h: u32,
+    src_pitch: u32,
+    key: u32,
+) {
+    if !COMP.initialized || src.is_null() {
+        return;
+    }
+    let Some((x0, y0, x1, y1)) = clip_rect(dst_x, dst_y, w, h) else { return; };
+    let bpp = COMP.bpp;
+    let bpp_bytes = (bpp / 8) as usize;
+    let buf = COMP.back_buffer.as_mut_ptr();
+    let src_x_off = (x0 as i32 - dst_x) as usize;
+    let src_y_off = (y0 as i32 - dst_y) as usize;
+
+    for row in 0..(y1 - y0) as usize {
+        let src_row = src.add((src_y_off + row) * src_pitch as usize + src_x_off * bpp_bytes);
+        let dst_row = buf.add(((y0 as usize + row) * COMP.pitch as usize) + x0 as usize * bpp_bytes);
+        for col in 0..(x1 - x0) as usize {
+            let px = read_pixel_buf(src_row.add(col * bpp_bytes), bpp);
+            if px != key {
+                write_pixel_buf(dst_row.add(col * bpp_bytes), px, bpp);
+            }
+        }
+    }
+    compositor_mark_dirty_rect(dst_x, dst_y, w, h);
+    COMP.dirty = true;
+}
+
+/// Draw a character with transparent background (only glyph pixels).
+pub unsafe fn compositor_draw_char_transparent(x: i32, y: i32, ch: u8, fg: u32) {
+    if !COMP.initialized || x >= COMP.width as i32 || y >= COMP.height as i32 {
+        return;
+    }
+    COMP.dirty = true;
+    compositor_mark_dirty_rect(x, y, FONT_WIDTH, FONT_HEIGHT);
+    let bpp_bytes = COMP.bpp / 8;
+    let buf = COMP.back_buffer.as_mut_ptr();
+    let glyph_offset = (ch as usize) * (FONT_HEIGHT as usize);
+    let font_len = VGA_FONT_8X16.len();
+
+    for row in 0..FONT_HEIGHT {
+        let py = y + row as i32;
+        if py < 0 { continue; }
+        if py >= COMP.height as i32 { break; }
+        let idx = glyph_offset + row as usize;
+        let glyph_row = if idx < font_len { VGA_FONT_8X16[idx] } else { 0 };
+        let row_base = buf.add((py as u32 * COMP.pitch) as usize);
+        for col in 0..FONT_WIDTH {
+            let px = x + col as i32;
+            if px < 0 { continue; }
+            if px >= COMP.width as i32 { break; }
+            if (glyph_row >> (7 - col)) & 1 != 0 {
+                write_pixel_buf(row_base.add((px as u32 * bpp_bytes) as usize), fg, COMP.bpp);
+            }
+        }
+    }
+}
+
+/// Draw a string with transparent background.
+pub unsafe fn compositor_draw_string_transparent(x: i32, y: i32, s: &[u8], fg: u32) {
+    let mut cx = x;
+    for &ch in s {
+        if ch == 0 { break; }
+        compositor_draw_char_transparent(cx, y, ch, fg);
+        cx += FONT_WIDTH as i32;
+    }
 }
 
 /// Copy a clipped rectangle from back buffer to framebuffer.

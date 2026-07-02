@@ -387,71 +387,69 @@ pub unsafe fn wm_compose_all() {
             let ww = w.width;
             let wh = w.height;
 
-            // Draw window border
-            let border_color: u32 = if focused { 0x4488CC } else { 0x666666 };
-            // Top border
-            compositor::compositor_fill_rect(wx, wy, ww, BORDER_WIDTH, border_color);
-            // Left border
-            compositor::compositor_fill_rect(wx, wy, BORDER_WIDTH, wh, border_color);
-            // Right border
-            compositor::compositor_fill_rect(
-                wx + ww as i32 - BORDER_WIDTH as i32,
-                wy,
-                BORDER_WIDTH,
-                wh,
-                border_color,
-            );
-            // Bottom border
-            compositor::compositor_fill_rect(
-                wx,
-                wy + wh as i32 - BORDER_WIDTH as i32,
-                ww,
-                BORDER_WIDTH,
-                border_color,
-            );
+            // --- Glassmorphism window ---
+            // 1. Frost the backdrop under the whole window
+            compositor::compositor_blur_rect(wx, wy, ww, wh, 9);
 
-            // Draw title bar
-            let title_color: u32 = if focused { 0x335599 } else { 0x444444 };
-            compositor::compositor_fill_rect(
+            // 2. Glass tint: dark pane over the content, lighter title strip
+            compositor::compositor_fill_rect_alpha(
+                wx + BORDER_WIDTH as i32,
+                wy + TITLE_BAR_HEIGHT as i32,
+                ww - BORDER_WIDTH * 2,
+                wh.saturating_sub(TITLE_BAR_HEIGHT + BORDER_WIDTH),
+                0x0E1626,
+                150,
+            );
+            let title_alpha: u32 = if focused { 60 } else { 28 };
+            compositor::compositor_fill_rect_alpha(
                 wx + BORDER_WIDTH as i32,
                 wy + BORDER_WIDTH as i32,
                 ww - BORDER_WIDTH * 2,
                 TITLE_BAR_HEIGHT - BORDER_WIDTH,
-                title_color,
+                0xFFFFFF,
+                title_alpha,
             );
 
-            // Draw title text
+            // 3. 1px glass edge highlight
+            let edge_alpha: u32 = if focused { 120 } else { 60 };
+            compositor::compositor_fill_rect_alpha(wx, wy, ww, BORDER_WIDTH, 0xFFFFFF, edge_alpha);
+            compositor::compositor_fill_rect_alpha(wx, wy, BORDER_WIDTH, wh, 0xFFFFFF, edge_alpha);
+            compositor::compositor_fill_rect_alpha(
+                wx + ww as i32 - BORDER_WIDTH as i32, wy, BORDER_WIDTH, wh, 0xFFFFFF, edge_alpha,
+            );
+            compositor::compositor_fill_rect_alpha(
+                wx, wy + wh as i32 - BORDER_WIDTH as i32, ww, BORDER_WIDTH, 0xFFFFFF, edge_alpha,
+            );
+
+            // 4. Title text on the glass
             let title_x = wx + BORDER_WIDTH as i32 + 6;
             let title_y = wy + BORDER_WIDTH as i32 + 4;
-            compositor::compositor_draw_string(
+            compositor::compositor_draw_string_transparent(
                 title_x,
                 title_y,
                 &w.title[..w.title_len],
-                0xFFFFFF,
-                title_color,
+                0xF2F5FF,
             );
 
-            // Draw close button [X]
+            // 5. Close button: red glass pill
             let close_x = wx + ww as i32 - BORDER_WIDTH as i32 - CLOSE_BTN_SIZE as i32 - 4;
             let close_y = wy + BORDER_WIDTH as i32 + 4;
-            compositor::compositor_fill_rect(
-                close_x,
-                close_y,
-                CLOSE_BTN_SIZE,
-                CLOSE_BTN_SIZE,
-                0xCC3333,
+            compositor::compositor_fill_rect_alpha(
+                close_x, close_y, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE, 0xE84855, 170,
             );
-            compositor::compositor_draw_char(close_x + 4, close_y, b'X', 0xFFFFFF, 0xCC3333);
+            compositor::compositor_draw_char_transparent(close_x + 4, close_y, b'X', 0xFFFFFF);
 
-            // Blit window content
+            // 6. Window content: black is the transparency key, so terminal
+            //    cell backgrounds show the glass instead of solid black
             if !w.content_buf.is_empty() {
-                compositor::compositor_blit(
+                compositor::compositor_blit_colorkey(
                     w.content_buf.as_ptr(),
                     w.content_x(),
                     w.content_y(),
                     w.content_width(),
                     w.content_height(),
                     w.content_pitch,
+                    0x000000,
                 );
             }
         }

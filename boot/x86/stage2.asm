@@ -379,57 +379,70 @@ vbe_setup:
     cmp ax, 0x004F
     jne .vbe_done
 
-    ; Try mode 0x118 (1024x768x32/24bpp)
-    mov ax, 0x4F01
-    mov cx, 0x0118
+    ; Auto-select best VBE mode: scan the controller's mode list and pick
+    ; the highest-resolution 32/24bpp linear-framebuffer mode that fits the
+    ; kernel compositor memory budget (<= 2,100,000 pixels, e.g. 1920x1080).
+    ; Scratch at 0x5400: best mode (word), best pixels (dword), best bpp (byte)
+    push fs
+    mov word  [0x5400], 0
+    mov dword [0x5404], 0
+    mov byte  [0x5408], 0
+
+    mov si, [0x500E]                ; VideoModePtr offset
+    mov ax, [0x5010]                ; VideoModePtr segment
+    mov fs, ax
+.scan_loop:
+    mov cx, [fs:si]
+    add si, 2
+    cmp cx, 0xFFFF
+    je .scan_done
+    push cx
+    mov ax, 0x4F01                  ; mode info -> 0x5200
     mov di, 0x5200
     int 0x10
+    pop cx
     cmp ax, 0x004F
-    jne .try_115
-    cmp byte [0x5219], 32
-    je .set_118
-    cmp byte [0x5219], 24
-    jne .try_115
-.set_118:
-    mov ax, 0x4F02
-    mov bx, 0x4118
-    int 0x10
-    cmp ax, 0x004F
-    je .vbe_store
-
-.try_115:
+    jne .scan_loop
+    mov ax, [0x5200]                ; attributes
+    and ax, 0x0081                  ; supported + linear framebuffer
+    cmp ax, 0x0081
+    jne .scan_loop
+    cmp byte [0x521B], 6            ; memory model: direct color
+    jne .scan_loop
+    mov bl, [0x5219]                ; bpp: accept 32 or 24
+    cmp bl, 32
+    je .bpp_ok
+    cmp bl, 24
+    jne .scan_loop
+.bpp_ok:
+    movzx eax, word [0x5212]        ; width
+    movzx edx, word [0x5214]        ; height
+    imul eax, edx                   ; total pixels
+    cmp eax, 2100000                ; compositor back-buffer budget cap
+    ja .scan_loop
+    cmp eax, [0x5404]
+    ja .take_mode
+    jb .scan_loop
+    cmp bl, [0x5408]                ; same pixels: prefer 32bpp
+    jbe .scan_loop
+.take_mode:
+    mov [0x5404], eax
+    mov [0x5400], cx
+    mov [0x5408], bl
+    jmp .scan_loop
+.scan_done:
+    pop fs
+    cmp word [0x5400], 0
+    je .vbe_done                    ; no usable mode -> stay in text mode
+    mov cx, [0x5400]                ; re-read info for the winning mode
     mov ax, 0x4F01
-    mov cx, 0x0115
-    mov di, 0x5200
-    int 0x10
-    cmp ax, 0x004F
-    jne .try_112
-    cmp byte [0x5219], 32
-    je .set_115
-    cmp byte [0x5219], 24
-    jne .try_112
-.set_115:
-    mov ax, 0x4F02
-    mov bx, 0x4115
-    int 0x10
-    cmp ax, 0x004F
-    jne .try_112
-    jmp .vbe_store
-
-.try_112:
-    mov ax, 0x4F01
-    mov cx, 0x0112
     mov di, 0x5200
     int 0x10
     cmp ax, 0x004F
     jne .vbe_done
-    cmp byte [0x5219], 32
-    je .set_112
-    cmp byte [0x5219], 24
-    jne .vbe_done
-.set_112:
+    mov bx, [0x5400]
+    or bx, 0x4000                   ; request linear framebuffer
     mov ax, 0x4F02
-    mov bx, 0x4112
     int 0x10
     cmp ax, 0x004F
     jne .vbe_done

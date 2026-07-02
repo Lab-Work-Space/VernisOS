@@ -2222,6 +2222,9 @@ static void rust_print_cb(const uint8_t *ptr, uint32_t len) {
 }
 
 // Static heap: 8MB, 4KB-aligned (GUI needs back-buffer + window buffers)
+// NOTE: do not enlarge — BSS end + the 4MB frame-allocator pool must stay
+// below the 0xF00000 kernel stack. The GUI back buffer intentionally lives
+// outside this heap (fixed region at 48MB, see compositor.rs).
 #define HEAP_SIZE (8 * 1024 * 1024)
 static uint8_t kernel_heap[HEAP_SIZE] __attribute__((aligned(4096)));
 
