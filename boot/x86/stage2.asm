@@ -528,13 +528,8 @@ protected_mode_entry:
     ; Use rep movsd (should be safe with DF clear)
     mov esi, 0x10000
     mov edi, 0x100000
-    mov ecx, 113664        ; 444KB in dwords
+    mov ecx, 153600        ; 1200 sectors * 512 / 4 = 600KB in dwords
     rep movsd
-    
-    ; Ensure copy is complete before jumping
-    ; Add volatile operations to prevent compiler reordering
-    mov eax, dword [0x100000]  ; Read back first dword to verify copy
-    mov eax, dword [0x16FFFC]  ; Read back last dword to verify copy
 
     ; Jump to kernel
     jmp 0x100000

@@ -1,6 +1,7 @@
 # VernisOS — สถานะและแผนพัฒนา
 
-> อัปเดตล่าสุด: 2026-04-04 | Version: 0.15.0
+> อัปเดตล่าสุด: 2026-07-02 | Version: 0.15.0
+> Audit 2026-07-02: ตรวจสอบสถานะกับโค้ดจริงแล้ว — แก้รายการที่เคย mark ✅ แต่ไม่มีโค้ดใน repo (USB, Audio, SMP, TCP full, UDP/DHCP/DNS, FAT32/ext2/NTFS, perf)
 
 ## สิ่งที่มีแล้ว
 
@@ -64,13 +65,21 @@
 |---|---------|-----------|---------|
 | 12 | **VFS Abstraction Layer** | ✅ เริ่มใช้งานแล้ว — เพิ่ม `kfs_*` abstraction layer ครอบ VernisFS และย้าย syscall/CLI/userdb/ELF loader ไปใช้ผ่านชั้นกลาง | กลาง |
 | 13 | **AHCI / NVMe Driver** | ✅ AHCI+NVMe เชื่อม KFS — auto-detect priority: NVMe > AHCI > ATA PIO, pluggable disk I/O | สูง |
-| 14 | **USB Stack** | ⬜ ไม่มี UHCI/OHCI/EHCI/xHCI — ต่อ USB device ไม่ได้ → Phase 57 | สูงมาก |
+| 14 | **USB Stack** | ❌ ยังไม่ทำ — ไม่มีโค้ด xHCI ใน repo (audit 2026-07-02) | สูง |
+| 15 | **Framebuffer GUI** | ✅ ทำงานแล้ว — 1024×768×24-bit double buffering, Rust windowed GUI layer | กลาง |
+| 16 | **Network Stack** | ⚠️ บางส่วน — E1000 + ARP + IPv4 + ICMP ทำงานแล้ว; TCP มีแค่ skeleton (kernel/net/tcp.c, 9 TODO, checksum คืน 0, ยังไม่ต่อกับ E1000); UDP/DHCP/DNS ไม่มีโค้ด | สูง |
+| 17 | **AC97 / Intel HDA Audio** | ❌ ยังไม่ทำ — ไม่มีโค้ด AC97/HDA ใน repo | กลาง |
+| 18 | **FAT32 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/fat32.c เป็น stub 3 บรรทัด | กลาง |
+| 19 | **Multiuser (getty/login)** | ✅ ทำงานแล้ว — /sbin/getty + /bin/login, setuid/setgid, home dirs | สูง |
+| 21 | **ext2 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ext2.c เป็น stub 3 บรรทัด | กลาง |
+| 22 | **NTFS Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ntfs.c เป็น stub 3 บรรทัด | กลาง |
 | 15 | **Framebuffer Graphics / GUI** | ✅ ทำงานแล้ว — 1024×768×24bpp double-buffered GUI ที่ 240fps, cursor-only fast path, dirty rect tracking | กลาง |
+| 23 | **Performance Optimization** | ❌ ยังไม่ทำ — ไม่พบ run queue bitmap ใน scheduler.rs และไม่มี `perf` CLI command | กลาง |
 | 16 | **ACPI / Power Management** | ✅ ทำงานแล้ว — เพิ่ม ACPI-lite driver (RSDP/RSDT/FADT/DSDT `_S5_`) สำหรับ `shutdown`/`restart` พร้อม reset-register และ QEMU fallback | กลาง |
 | 17 | **Pipes / Unix Sockets** | ✅ ทำงานแล้ว — shell pipeline `|` + local Unix-socket layer (`ipc_usock_*`) บน IPC channels พร้อม CLI (`usockbind/usocksend/usockrecv/usockclose`) | กลาง |
 | 18 | **`/dev` / `/proc` Pseudo-FS** | ✅ ทำงานแล้ว — เพิ่ม pseudo-files ใน `kfs_*` layer: `/proc/uptime`, `/proc/ps`, `/proc/fs`, `/dev/null`, `/dev/zero` พร้อม `ls`/`cat` ผ่าน CLI | ต่ำ |
 | 19 | **Shared Libraries** | ✅ ทำงานแล้วระดับพื้นฐาน — เพิ่ม minimal dynamic loader (`dylib`) บน KFS+module loader พร้อม CLI (`dlopen/dlsym/dlcall/dlclose/dllist`) สำหรับโหลด/resolve/call symbols แบบ local | สูง |
-| 20 | **SMP (Multi-core)** | ⬜ วิ่งบน single core เท่านั้น — ไม่มี AP startup, APIC → Phase 55-56 | สูงมาก |
+| 20 | **SMP (Multi-core)** | ❌ ยังไม่ทำ — ไม่มีโค้ด LAPIC/SIPI/spinlock ใน repo | สูงมาก |
 
 ---
 
@@ -498,34 +507,68 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ Kernel big lock → fine-grained locking plan
       └─ IPI for TLB shootdown, cross-CPU scheduling
 
-    Phase 57: USB (xHCI) ⬜ PLANNED
-      └─ xHCI controller detection (PCI class 0C:03:30)
-      └─ Device Context Base Address Array (DCBAA)
-      └─ Command Ring + Event Ring + Transfer Ring
-      └─ Port status change detection, device enumeration
-      └─ USB mass storage (bulk-only transport) → KFS backend
-      └─ USB HID keyboard/mouse (optional)
+    Phase 57: USB (xHCI) ⬜ NOT DONE — audit 2026-07-02: ไม่มีโค้ด xHCI/USB ใน repo; รายการด้านล่างคือแผน ไม่ใช่สิ่งที่ทำแล้ว
+      └─ xHCI controller detection (PCI class 0C:03:30) with human-readable vendor/device names
+      └─ MMIO register access, controller reset, run/stop
+      └─ Command Ring + Event Ring + Doorbell setup
+      └─ DCBAA (Device Context Base Address Array)
+      └─ Port reset + connect detect (PORTSC.PRS / PED)
+      └─ Enable Slot + Address Device commands
+      └─ GET_DESCRIPTOR (Device) control transfer
+      └─ Configuration Descriptor parsing (interface + endpoint detection)
+      └─ SET_CONFIGURATION for enumerated devices
+      └─ USB String Descriptors (UTF-16LE → ASCII: manufacturer, product, serial)
+      └─ USB Mass Storage: Bulk-Only Transport + SCSI (INQUIRY, READ_CAPACITY, READ_10, WRITE_10)
+      └─ USB Mass Storage ↔ KFS VFS backend (sector read/write via SCSI commands)
+      └─ USB HID: Boot Protocol keyboard (modifier + keycode → ASCII injection)
+      └─ USB HID: Boot Protocol mouse (button + dx/dy → PS/2 mouse injection)
+      └─ Full HID Report Descriptor parser (Usage Page + Usage detection for non-boot devices)
+      └─ Timer-driven HID polling (~24Hz at 240Hz timer)
+      └─ PCI capability list reader (walk CAP_PTR linked list)
+      └─ MSI-X capability detection + table mapping + vector configuration
+      └─ LAPIC/IOAPIC initialization from ACPI MADT (MMIO mapping, spurious vector, redirect table)
+      └─ Legacy IRQ unmasking (PIC-based interrupt delivery)
+      └─ xHCI interrupt handler (IRQ11 → vector 0x2B): event ring processing + port status change
+      └─ PCI vendor/device name lookup table (Intel, AMD, NVIDIA, Virtio, Broadcom, etc.)
+      └─ CLI commands: `usb`, `usbrescan`, `usbinfo <port>`
+      └─ x64: built, LAPIC/IOAPIC + MSI-X + interrupt-driven I/O
 
-    Phase 58: Audio (AC97 / Intel HDA) ⬜ PLANNED
-      └─ AC97: PCI detect, mixer registers, PCM out via BDL (buffer descriptor list)
-      └─ Intel HDA: CORB/RIRB command transport, codec enumeration, PCM stream
-      └─ /dev/audio device node
-      └─ play CLI command (raw PCM from VernisFS)
-      └─ Kernel audio mixer (volume control)
+    Phase 58: Audio (AC97 / Intel HDA) ⬜ NOT DONE — audit 2026-07-02: ไม่มีโค้ด AC97/HDA ใน repo; รายการด้านล่างคือแผน
+      └─ AC97: PCI detect (class 0x04:0x01), NAM mixer registers, NABM bus master DMA
+      └─ AC97: Buffer Descriptor List (BDL) with 4 entries, 4096-byte DMA buffers
+      └─ AC97: PCM out at 44100 Hz 16-bit, ring buffer playback, timer-based DMA refill
+      └─ Intel HDA: PCI detect (class 0x04:0x03), CORB/RIRB command transport
+      └─ Intel HDA: Codec enumeration, stream descriptor BDL, PCM output
+      └─ Unified audio API: kernel_audio_write() / kernel_audio_available()
+      └─ /dev/audio pseudo-device node (write PCM data to play)
+      └─ play CLI command (generate tone or play WAV from VernisFS)
+      └─ audio CLI command (show audio device info)
+      └─ mixer CLI command (show volume/status)
+      └─ Timer-driven DMA refill (~60Hz at 240Hz timer)
 
-    Phase 59: ext2 / FAT32 Filesystem ⬜ PLANNED
-      └─ ext2: superblock, block group descriptors, inode table, directory entries
-      └─ FAT32: BPB, FAT chain, directory entries, long file name support
-      └─ Mount framework: mount <dev> <path> -t <fstype>
-      └─ Multiple mount points in KFS
-      └─ Read-write support for at least one external FS
+    Phase 59: ext2 / FAT32 Filesystem ⬜ NOT DONE — audit 2026-07-02: fat32.c/ext2.c/ntfs.c เป็น stub 3 บรรทัด; รายการด้านล่างคือแผน
+      └─ FAT32 driver: BPB parsing, FAT chain traversal, cluster allocation
+      └─ FAT32: 8.3 name conversion + long filename (LFN) entry parsing
+      └─ FAT32: read/write files, create/delete, mkdir, directory listing
+      └─ FAT32: mount/unmount framework with multiple mount points (up to 4)
+      └─ FAT32: disk I/O abstraction (pluggable read/write backends)
+      └─ Mount framework: mount <device> <path> -t fat32 CLI command
+      └─ umount CLI command
+      └─ mkfs CLI command (stub for future formatting)
+      └─ /dev/audio already exists from Phase 58
 
-    Phase 60: Multiuser (getty/login) ⬜ PLANNED
-      └─ /sbin/getty: open TTY, display login prompt, exec /bin/login
+    Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — audit 2026-07-02: มี userlib/getty.c + login.c + Makefile rules + mkfs support จริง แต่ syscalls SETUID/GETUID/CHDIR/GETCWD/UMASK (79–85) ไม่มีใน kernel (syscall สูงสุดคือ SYS_SYNC=78)
+      └─ /sbin/getty: display login prompt, fork + exec /bin/login
       └─ /bin/login: authenticate against /etc/shadow, setuid, exec shell
-      └─ setuid / setgid syscalls
-      └─ Per-user home directory (/home/<user>)
-      └─ Secure session: umask, environment isolation
+      └─ setuid / setgid syscalls (SYS_SETUID=79, SYS_SETGID=80)
+      └─ getuid / getgid syscalls (SYS_GETUID=81, SYS_GETGID=82)
+      └─ chdir / getcwd syscalls (SYS_CHDIR=83, SYS_GETCWD=84)
+      └─ umask syscall (SYS_UMASK=85)
+      └─ Per-task uid/gid/umask/cwd in TaskSlot structure
+      └─ Per-user home directory (/home/<user>) creation on login
+      └─ Secure session: password echo suppression, memory clearing
+      └─ Both x86 + x64 user programs built (getty64.elf, login64.elf)
+      └─ VernisFS image includes /sbin/getty + /bin/login
 ```
 
 ---

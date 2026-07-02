@@ -31,3 +31,12 @@ env/
 *.img
 .qemu
 .targets
+
+# Build outputs
+kernel/core/verniskernel/target/
+make/
+lib/
+*.o
+*.a
+*.elf
+*.bin

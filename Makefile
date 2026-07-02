@@ -86,7 +86,7 @@ BUILD_DATE := $(shell date +%Y-%m-%d)
 # Boot stages
 STAGE1 = boot/x86/stage1.asm
 STAGE2 = boot/x86/stage2.asm
-STAGE3 = boot/x86/stage3.asm
+STAGE3 = boot/CISC/stage3.asm
 
 # Kernel sources
 KERNEL_X86_SRC = kernel/arch/x86/kernel_x86.c
@@ -110,7 +110,7 @@ KERNEL_X64_LD = kernel/arch/x86_64/linker.ld
 # Boot output
 STAGE1_BIN = make/boot/x86/stage1.bin
 STAGE2_BIN = make/boot/x86/stage2.bin
-STAGE3_BIN = make/boot/x86/stage3.bin
+STAGE3_BIN = make/boot/CISC/stage3.bin
 
 KERNEL_X86_TCP = make/kernel/arch/x86/tcp.o
 KERNEL_X64_TCP = make/kernel/arch/x86_64/tcp.o
@@ -136,8 +136,11 @@ KERNEL_X86_OBJ := make/kernel/arch/x86/kernel_x86.o \
 	make/kernel/arch/x86/selftest.o \
 	make/kernel/arch/x86/auditlog.o \
 	make/kernel/arch/x86/klog.o \
-	make/kernel/arch/x86/bcache.o \
-	make/kernel/arch/x86/tcp.o
+make/kernel/arch/x86/bcache.o \
+	make/kernel/arch/x86/tcp.o \
+make/kernel/arch/x86/fat32.o \
+	make/kernel/arch/x86/ext2.o \
+	make/kernel/arch/x86/ntfs.o
 # ==== Compile libc.c (x86) ====
 userlib/libc.o: userlib/libc.c userlib/libc.h | prepare
 	$(CC_X86) $(CFLAGS_X86) -c $< -o $@
@@ -162,7 +165,10 @@ KERNEL_X64_TST  = make/kernel/arch/x86_64/selftest.o
 KERNEL_X64_AUD  = make/kernel/arch/x86_64/auditlog.o
 KERNEL_X64_KLOG = make/kernel/arch/x86_64/klog.o
 KERNEL_X64_BCACHE = make/kernel/arch/x86_64/bcache.o
-KERNEL_X64_OBJ  = make/kernel/arch/x86_64/kernel_x64.o $(KERNEL_X64_SHIM) $(KERNEL_X64_INTR) $(KERNEL_X64_SYSC) $(KERNEL_X64_IPC) $(KERNEL_X64_MOD) $(KERNEL_X64_DLIB) $(KERNEL_X64_SAND) $(KERNEL_X64_CLI) $(KERNEL_X64_AI) $(KERNEL_X64_AIE) $(KERNEL_X64_ACPI) $(KERNEL_X64_POL) $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP)
+KERNEL_X64_FAT32 = make/kernel/arch/x86_64/fat32.o
+KERNEL_X64_EXT2 = make/kernel/arch/x86_64/ext2.o
+KERNEL_X64_NTFS = make/kernel/arch/x86_64/ntfs.o
+KERNEL_X64_OBJ  = make/kernel/arch/x86_64/kernel_x64.o $(KERNEL_X64_SHIM) $(KERNEL_X64_INTR) $(KERNEL_X64_SYSC) $(KERNEL_X64_IPC) $(KERNEL_X64_MOD) $(KERNEL_X64_DLIB) $(KERNEL_X64_SAND) $(KERNEL_X64_CLI) $(KERNEL_X64_AI) $(KERNEL_X64_AIE) $(KERNEL_X64_ACPI) $(KERNEL_X64_POL) $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) $(KERNEL_X64_FAT32) $(KERNEL_X64_EXT2) $(KERNEL_X64_NTFS)
 
 KERNEL_X86_ELF = make/kernel/arch/x86/kernel_x86.elf
 KERNEL_X64_ELF = make/kernel/arch/x86_64/kernel_x64.elf
@@ -202,6 +208,18 @@ USER_VSH_X64_O  = $(USER_OUT_DIR)/vsh_x64.o
 USER_VSH_X86_ELF = $(USER_OUT_DIR)/vsh32.elf
 USER_VSH_X64_ELF = $(USER_OUT_DIR)/vsh64.elf
 
+# Phase 60: getty + login
+USER_GETTY_SRC = $(USER_DIR)/getty.c
+USER_LOGIN_SRC = $(USER_DIR)/login.c
+USER_GETTY_X86_O = $(USER_OUT_DIR)/getty_x86.o
+USER_GETTY_X64_O = $(USER_OUT_DIR)/getty_x64.o
+USER_LOGIN_X86_O = $(USER_OUT_DIR)/login_x86.o
+USER_LOGIN_X64_O = $(USER_OUT_DIR)/login_x64.o
+USER_GETTY_X86_ELF = $(USER_OUT_DIR)/getty32.elf
+USER_GETTY_X64_ELF = $(USER_OUT_DIR)/getty64.elf
+USER_LOGIN_X86_ELF = $(USER_OUT_DIR)/login32.elf
+USER_LOGIN_X64_ELF = $(USER_OUT_DIR)/login64.elf
+
 # ==== Toolchains ====
 CC_X86 = i686-elf-gcc
 CC_X64 = x86_64-elf-gcc
@@ -235,6 +253,7 @@ all: prepare build-core $(UNIVERSAL_IMG)
 # ==== Prepare directories ====
 prepare:
 	mkdir -p make/boot/x86
+	mkdir -p make/boot/CISC
 	mkdir -p make/kernel/arch/x86
 	mkdir -p make/kernel/arch/x86_64
 	mkdir -p make/user
@@ -428,9 +447,9 @@ $(KERNEL_X64_ACPI): kernel/drivers/acpi.c include/acpi.h | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
 
 # ==== VernisFS image ====
-$(VFS_BIN): ai/tools/mkfs_vernis.py $(USER_VSH_X86_ELF) $(USER_VSH_X64_ELF) | prepare
+$(VFS_BIN): ai/tools/mkfs_vernis.py $(USER_VSH_X86_ELF) $(USER_VSH_X64_ELF) $(USER_GETTY_X64_ELF) $(USER_LOGIN_X64_ELF) | prepare
 	@echo "Creating VernisFS image..."
-	python3 ai/tools/mkfs_vernis.py -o $(VFS_BIN) --vsh32 $(USER_VSH_X86_ELF) --vsh64 $(USER_VSH_X64_ELF)
+	python3 ai/tools/mkfs_vernis.py -o $(VFS_BIN) --vsh32 $(USER_VSH_X86_ELF) --vsh64 $(USER_VSH_X64_ELF) --getty $(USER_GETTY_X64_ELF) --login $(USER_LOGIN_X64_ELF)
 
 # ==== User-space programs (Phase 44/45) ====
 $(USER_CRT0_X86_O): $(USER_CRT0_X86) | prepare
@@ -456,6 +475,32 @@ $(USER_VSH_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_VSH_X86_O) $(U
 
 $(USER_VSH_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_VSH_X64_O) $(USER_LD_X64) | prepare
 	$(LD_X64) -T $(USER_LD_X64) -m elf_x86_64 --gc-sections $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_VSH_X64_O) -o $@
+
+# Phase 60: getty + login (x86)
+$(USER_GETTY_X86_O): $(USER_GETTY_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
+	$(CC_X86) $(USER_CFLAGS_X86) -c $< -o $@
+
+$(USER_LOGIN_X86_O): $(USER_LOGIN_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
+	$(CC_X86) $(USER_CFLAGS_X86) -c $< -o $@
+
+$(USER_GETTY_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_GETTY_X86_O) $(USER_LD_X86) | prepare
+	$(LD_X86) -T $(USER_LD_X86) -m elf_i386 --gc-sections $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_GETTY_X86_O) -o $@
+
+$(USER_LOGIN_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_LOGIN_X86_O) $(USER_LD_X86) | prepare
+	$(LD_X86) -T $(USER_LD_X86) -m elf_i386 --gc-sections $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_LOGIN_X86_O) -o $@
+
+# Phase 60: getty + login (x64)
+$(USER_GETTY_X64_O): $(USER_GETTY_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
+	$(CC_X64) $(USER_CFLAGS_X64) -c $< -o $@
+
+$(USER_LOGIN_X64_O): $(USER_LOGIN_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
+	$(CC_X64) $(USER_CFLAGS_X64) -c $< -o $@
+
+$(USER_GETTY_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_GETTY_X64_O) $(USER_LD_X64) | prepare
+	$(LD_X64) -T $(USER_LD_X64) -m elf_x86_64 --gc-sections $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_GETTY_X64_O) -o $@
+
+$(USER_LOGIN_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_LOGIN_X64_O) $(USER_LD_X64) | prepare
+	$(LD_X64) -T $(USER_LD_X64) -m elf_x86_64 --gc-sections $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_LOGIN_X64_O) -o $@
 
 # ==== Compile policy_loader.c (x86) ====
 $(KERNEL_X86_POL): kernel/security/policy_loader.c include/ai_bridge.h | prepare
@@ -495,6 +540,33 @@ $(KERNEL_X86_BCACHE): kernel/fs/bcache.c include/bcache.h include/vernisfs.h | p
 
 # ==== Compile bcache.c (x64) ====
 $(KERNEL_X64_BCACHE): kernel/fs/bcache.c include/bcache.h include/vernisfs.h | prepare
+	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile fat32.c (x86) ====
+KERNEL_X86_FAT32 = make/kernel/arch/x86/fat32.o
+$(KERNEL_X86_FAT32): kernel/fs/fat32.c include/fat32.h | prepare
+	$(CC_X86) $(CFLAGS_X86) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile fat32.c (x64) ====
+$(KERNEL_X64_FAT32): kernel/fs/fat32.c include/fat32.h | prepare
+	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile ext2.c (x86) ====
+KERNEL_X86_EXT2 = make/kernel/arch/x86/ext2.o
+$(KERNEL_X86_EXT2): kernel/fs/ext2.c include/ext2.h | prepare
+	$(CC_X86) $(CFLAGS_X86) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile ext2.c (x64) ====
+$(KERNEL_X64_EXT2): kernel/fs/ext2.c include/ext2.h | prepare
+	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile ntfs.c (x86) ====
+KERNEL_X86_NTFS = make/kernel/arch/x86/ntfs.o
+$(KERNEL_X86_NTFS): kernel/fs/ntfs.c include/ntfs.h | prepare
+	$(CC_X86) $(CFLAGS_X86) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile ntfs.c (x64) ====
+$(KERNEL_X64_NTFS): kernel/fs/ntfs.c include/ntfs.h | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
 
 # ==== Compile userdb.c (x86) ====
@@ -540,7 +612,9 @@ $(KERNEL_X64_KLOG): kernel/log/klog.c include/klog.h | prepare
 $(KERNEL_X64_BIN): $(KERNEL_X64_SRC) $(KERNEL_X64_LD) $(KERNEL_X64_SHIM) \
 	   $(KERNEL_X64_INTR) $(KERNEL_X64_SYSC) $(KERNEL_X64_IPC) \
 	   $(KERNEL_X64_MOD) $(KERNEL_X64_DLIB) $(KERNEL_X64_SAND) $(KERNEL_X64_CLI) $(KERNEL_X64_AI) $(KERNEL_X64_AIE) $(KERNEL_X64_ACPI) $(KERNEL_X64_POL) \
-	   $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) $(VERNISOS_LIB_X64) | prepare
+	   $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) \
+	   $(KERNEL_X64_FAT32) $(KERNEL_X64_EXT2) $(KERNEL_X64_NTFS) \
+	   $(VERNISOS_LIB_X64) | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $(KERNEL_X64_SRC) -o make/kernel/arch/x86_64/kernel_x64.o
 	$(LD_X64) -T $(KERNEL_X64_LD) -m elf_x86_64 --gc-sections \
 	          $(KERNEL_X64_OBJ) $(VERNISOS_LIB_X64) -o $(KERNEL_X64_ELF)
@@ -548,10 +622,14 @@ $(KERNEL_X64_BIN): $(KERNEL_X64_SRC) $(KERNEL_X64_LD) $(KERNEL_X64_SHIM) \
 
 # ==== Run/Debug ====
 run32: $(UNIVERSAL_IMG)
-	qemu-system-i386 -drive format=raw,file=$(UNIVERSAL_IMG)
+	qemu-system-i386 -drive format=raw,file=$(UNIVERSAL_IMG) \
+	    -serial stdio \
+	    -device usb-ehci -device usb-tablet
 
 run64: $(UNIVERSAL_IMG)
-	qemu-system-x86_64 -drive format=raw,file=$(UNIVERSAL_IMG)
+	qemu-system-x86_64 -drive format=raw,file=$(UNIVERSAL_IMG) \
+	    -serial stdio \
+	    -device usb-ehci -device usb-tablet
 
 # Run x64 with AI bridge on TCP port 4444
 # Start Python listener first: python3 ai/ai_listener.py --port 4444
@@ -604,7 +682,7 @@ size-report: $(UNIVERSAL_IMG)
 	@echo "Boot stages:"
 	@printf "  stage1: %5d bytes\n" $$(wc -c < make/boot/x86/stage1.bin)
 	@printf "  stage2: %5d bytes\n" $$(wc -c < make/boot/x86/stage2.bin)
-	@printf "  stage3: %5d bytes\n" $$(wc -c < make/boot/x86/stage3.bin)
+	@printf "  stage3: %5d bytes\n" $$(wc -c < make/boot/CISC/stage3.bin)
 	@echo ""
 	@echo "Data blobs:"
 	@printf "  policy : %5d bytes\n" $$(wc -c < make/policy.bin)

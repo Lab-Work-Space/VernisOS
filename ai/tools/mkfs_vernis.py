@@ -288,6 +288,8 @@ def main():
     parser.add_argument("-o", "--output", default="make/vernisfs.bin", help="Output file")
     parser.add_argument("--vsh64", default="make/user/vsh64.elf", help="Optional x86_64 vsh ELF path")
     parser.add_argument("--vsh32", default="make/user/vsh32.elf", help="Optional i686 vsh ELF path")
+    parser.add_argument("--getty", default=None, help="Optional x86_64 getty ELF path")
+    parser.add_argument("--login", default=None, help="Optional x86_64 login ELF path")
     args = parser.parse_args()
 
     # === Build default files ===
@@ -367,6 +369,26 @@ def main():
             files.append(("/bin/vsh32", next_sector, len(vsh32_data), 1, 0x00))
             data_blocks.append(vsh32_data)
             next_sector += vsh32_sectors
+
+    # Phase 60: /sbin/getty (optional)
+    if args.getty and os.path.exists(args.getty):
+        with open(args.getty, "rb") as f:
+            getty_data = f.read()
+        if getty_data:
+            getty_sectors = (len(getty_data) + 511) // 512
+            files.append(("/sbin/getty", next_sector, len(getty_data), 1, 0x00))
+            data_blocks.append(getty_data)
+            next_sector += getty_sectors
+
+    # Phase 60: /bin/login (optional)
+    if args.login and os.path.exists(args.login):
+        with open(args.login, "rb") as f:
+            login_data = f.read()
+        if login_data:
+            login_sectors = (len(login_data) + 511) // 512
+            files.append(("/bin/login", next_sector, len(login_data), 1, 0x00))
+            data_blocks.append(login_data)
+            next_sector += login_sectors
 
     # === Build image ===
 
