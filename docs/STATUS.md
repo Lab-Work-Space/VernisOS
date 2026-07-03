@@ -1,7 +1,9 @@
 # VernisOS — สถานะและแผนพัฒนา
 
-> อัปเดตล่าสุด: 2026-07-02 | Version: 0.15.0
-> Audit 2026-07-02: ตรวจสอบสถานะกับโค้ดจริงแล้ว — แก้รายการที่เคย mark ✅ แต่ไม่มีโค้ดใน repo (USB, Audio, SMP, TCP full, UDP/DHCP/DNS, FAT32/ext2/NTFS, perf)
+> อัปเดตล่าสุด: 2026-07-03 | Version: 0.15.0
+> Audit 2026-07-03: sync ตารางสรุปกับ roadmap + โค้ดจริง — แก้ getty/login ที่ตาราง
+> เคย mark ✅ (จริงๆ ⚠️ PARTIAL: ไม่ถูก launch, ไม่มี setuid/home, hardcode creds),
+> และอัปเดต socket-fd model (Phase 52 ✅ แล้ว)
 
 ## สิ่งที่มีแล้ว
 
@@ -31,7 +33,7 @@
 | Self-Test | Boot-time validation of subsystems | 14 |
 | Module Registry | Dynamic kernel module register/unregister | 6 |
 | Framebuffer GUI | Auto-resolution (VBE scan, up to 1920×1080×32), glassmorphism compositor, Rust windowed GUI layer | 24, 61 |
-| Network Stack | E1000 driver, ARP+IPv4+ICMP, PCI enumeration, user commands | 22 |
+| Network Stack | E1000 + ARP/IPv4/ICMP + TCP/UDP + DHCP/DNS + userland sockets | 22, 49-52 |
 | Process Signals | PCB signal_pending, signal delivery, POSIX priority | 23 |
 
 ---
@@ -67,10 +69,10 @@
 | 13 | **AHCI / NVMe Driver** | ✅ AHCI+NVMe เชื่อม KFS — auto-detect priority: NVMe > AHCI > ATA PIO, pluggable disk I/O | สูง |
 | 14 | **USB Stack** | ❌ ยังไม่ทำ — ไม่มีโค้ด xHCI ใน repo (audit 2026-07-02) | สูง |
 | 15 | **Framebuffer GUI** | ✅ ทำงานแล้ว — auto-resolution (สูงสุด 1920×1080×32) + glassmorphism UI (Phase 61) | กลาง |
-| 16 | **Network Stack** | ✅ เกือบครบ — E1000 + ARP + IPv4 + ICMP + TCP + UDP + DHCP client + DNS resolver (Phase 49-51 ทดสอบ end-to-end กับ QEMU slirp + internet จริง); ที่เหลือ: TCP sliding window/data retransmit, socket-fd model | สูง |
+| 16 | **Network Stack** | ✅ ใช้งานได้ — E1000 + ARP + IPv4 + ICMP + TCP + UDP + DHCP + DNS + userland socket fds (Phase 49-52, ทดสอบ end-to-end กับ host+internet จริง); ที่เหลือ: TCP sliding window/data retransmit, SYS_LISTEN/ACCEPT | สูง |
 | 17 | **AC97 / Intel HDA Audio** | ❌ ยังไม่ทำ — ไม่มีโค้ด AC97/HDA ใน repo | กลาง |
 | 18 | **FAT32 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/fat32.c เป็น stub 3 บรรทัด | กลาง |
-| 19 | **Multiuser (getty/login)** | ✅ ทำงานแล้ว — /sbin/getty + /bin/login, setuid/setgid, home dirs | สูง |
+| 19 | **Multiuser (getty/login)** | ⚠️ PARTIAL — getty/login ELF + Phase 60 syscalls (setuid/getuid/chdir/umask 79-85) มีแล้ว แต่ boot ยัง launch init→vsh ตรง (ไม่ผ่าน getty); login hardcode root/vernis + /bin/vsh64, ไม่เรียก setuid, ไม่มี home dir | สูง |
 | 21 | **ext2 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ext2.c เป็น stub 3 บรรทัด | กลาง |
 | 22 | **NTFS Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ntfs.c เป็น stub 3 บรรทัด | กลาง |
 | 15 | **Framebuffer Graphics / GUI** | ✅ ทำงานแล้ว — auto-res double-buffered GUI, cursor-only fast path, dirty rect tracking; glassmorphism ทำให้ full compose ต่อ event (ดู Phase 61) | กลาง |
@@ -472,7 +474,7 @@ Phase 28: Shell Pipeline Support ✅ DONE
         + dispatcher proto 17 → udp_receive_packet
       └─ CLI: udpbind / udpsend <ip> <port> <text> / udprecv / udpclose
       └─ Verified: datagram จาก guest ถึง host UDP listener ผ่าน slirp
-      └─ ยังไม่ทำ: unified socket API + socket fd model (Phase 52)
+      └─ Phase 52 (socket fd model) ✅ ทำแล้ว
 
     Phase 51: DHCP + DNS Client ✅ DONE (2026-07-03)
       └─ DHCP DORA เต็ม (RFC 2131 minimal): DISCOVER/OFFER/REQUEST/ACK, xid match,
