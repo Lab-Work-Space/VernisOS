@@ -28,6 +28,11 @@
 #define SYS_GETCWD    84
 #define SYS_UMASK     85
 #define SYS_YIELD     86
+#define SYS_SOCKET    87
+#define SYS_CONNECT   88
+#define SYS_BIND      89
+#define SOCK_STREAM   1     /* TCP */
+#define SOCK_DGRAM    2     /* UDP */
 
 /* ---- Architecture-specific syscall inline ---- */
 
@@ -145,6 +150,20 @@ static inline int umask_sys(int mask) {
 
 static inline int yield(void) {
     return (int)_syscall3(SYS_YIELD, 0, 0, 0);
+}
+
+/* Phase 52: sockets. IPs are host byte order (a<<24|b<<16|c<<8|d).
+   read()/write()/close() work on the returned fd. */
+static inline int socket(int type) {
+    return (int)_syscall3(SYS_SOCKET, (size_t)type, 0, 0);
+}
+
+static inline int connect(int fd, unsigned int ip, unsigned short port) {
+    return (int)_syscall3(SYS_CONNECT, (size_t)fd, (size_t)ip, (size_t)port);
+}
+
+static inline int bind_port(int fd, unsigned short port) {
+    return (int)_syscall3(SYS_BIND, (size_t)fd, (size_t)port, 0);
 }
 
 static inline void *sbrk(int increment) {

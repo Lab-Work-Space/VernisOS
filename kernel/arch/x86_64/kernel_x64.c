@@ -691,6 +691,9 @@ static void pic_send_eoi(uint8_t irq) {
 #define SYS_GETCWD    84
 #define SYS_UMASK     85
 #define SYS_YIELD     86    // Phase 53: give up remaining time slice
+#define SYS_SOCKET    87    // Phase 52: socket(type) 1=TCP 2=UDP -> fd
+#define SYS_CONNECT   88    // Phase 52: connect(fd, ip, port)
+#define SYS_BIND      89    // Phase 52: bind(fd, port)
 
 // Perf counters (STATUS item 23) — read via kernel_perf_get() for the CLI
 static uint64_t g_perf_syscalls;
@@ -1166,6 +1169,8 @@ extern int32_t scheduler_get_exit_code(const void *sched, size_t pid);
 #define FD_TYPE_TTY        2   // Terminal device (stdin/stdout/stderr)
 #define FD_TYPE_PIPE_R     3   // Read end of pipe
 #define FD_TYPE_PIPE_W     4   // Write end of pipe
+#define FD_TYPE_SOCK_TCP   5   // Phase 52: TCP socket (pipe_idx = tcb id)
+#define FD_TYPE_SOCK_UDP   6   // Phase 52: UDP socket (pipe_idx = udp sock id)
 
 // Phase 42: Kernel TTY
 #define TTY_BUF_SIZE     256
@@ -1267,7 +1272,9 @@ typedef struct {
     uint8_t  flags;               // O_RDONLY=1, O_WRONLY=2, O_RDWR=3
     char     path[64];            // VFS path (for FD_TYPE_FILE)
     uint32_t offset;              // file cursor offset
-    uint8_t  pipe_idx;            // index into kernel_pipes (for PIPE types)
+    uint8_t  pipe_idx;            // pipe index, or kernel socket id (SOCK types)
+    uint32_t sock_peer_ip;       // Phase 52: UDP connected peer (host order)
+    uint16_t sock_peer_port;
 } FdEntry;
 
 // =============================================================================
@@ -1343,6 +1350,8 @@ static void fd_table_init(FdEntry *fdt) {
         fdt[i].path[0] = '\0';
         fdt[i].offset = 0;
         fdt[i].pipe_idx = 0;
+        fdt[i].sock_peer_ip = 0;
+        fdt[i].sock_peer_port = 0;
     }
     // fd 0 = stdin (TTY read)
     fdt[0].type = FD_TYPE_TTY; fdt[0].flags = 1; // O_RDONLY
@@ -1374,6 +1383,10 @@ static void fd_close_entry(FdEntry *fdt, int fd) {
             if (!kernel_pipes[pidx].read_open && !kernel_pipes[pidx].write_open)
                 kernel_pipes[pidx].active = 0;
         }
+    } else if (fdt[fd].type == FD_TYPE_SOCK_TCP && fdt[fd].pipe_idx != 0xFF) {
+        tcp_close(fdt[fd].pipe_idx);
+    } else if (fdt[fd].type == FD_TYPE_SOCK_UDP && fdt[fd].pipe_idx != 0xFF) {
+        udp_close(fdt[fd].pipe_idx);
     }
     fdt[fd].type = FD_TYPE_NONE;
     fdt[fd].flags = 0;
@@ -1458,6 +1471,19 @@ static int64_t sys_read_fd(FdEntry *fdt, int fd, uint64_t buf_ptr, uint64_t coun
         fdt[fd].offset += (uint32_t)n;
         return n;
     }
+    if (fdt[fd].type == FD_TYPE_SOCK_TCP && fdt[fd].pipe_idx != 0xFF) {
+        int n = tcp_recv(fdt[fd].pipe_idx, (void *)buf_ptr, (int)count);
+        if (n == 0 && current_task_idx >= 0)  // no data yet: yield slice
+            task_slots[current_task_idx].ticks_remaining = 1;
+        return n;
+    }
+    if (fdt[fd].type == FD_TYPE_SOCK_UDP && fdt[fd].pipe_idx != 0xFF) {
+        uint32_t sip; uint16_t sport;
+        int n = udp_recvfrom(fdt[fd].pipe_idx, (void *)buf_ptr, (int)count, &sip, &sport);
+        if (n == 0 && current_task_idx >= 0)
+            task_slots[current_task_idx].ticks_remaining = 1;
+        return n;
+    }
     return -1;
 }
 
@@ -1491,6 +1517,84 @@ static int64_t sys_write_fd(FdEntry *fdt, int fd, uint64_t buf_ptr, uint64_t cou
         for (int i = 0; i < (int)count; i++) fd_wr_buf[i] = ubuf[i];
         int rc = kfs_write_file(fdt[fd].path, fd_wr_buf, count);
         return rc < 0 ? -1 : (int64_t)count;
+    }
+    if (fdt[fd].type == FD_TYPE_SOCK_TCP && fdt[fd].pipe_idx != 0xFF) {
+        return (int64_t)tcp_send(fdt[fd].pipe_idx, (const void *)buf_ptr, (int)count);
+    }
+    if (fdt[fd].type == FD_TYPE_SOCK_UDP && fdt[fd].pipe_idx != 0xFF) {
+        return (int64_t)udp_sendto(fdt[fd].pipe_idx, fdt[fd].sock_peer_ip,
+                                   fdt[fd].sock_peer_port, (const void *)buf_ptr,
+                                   (int)count);
+    }
+    return -1;
+}
+
+// Phase 52: socket(type) 1=SOCK_STREAM(TCP), 2=SOCK_DGRAM(UDP) -> fd
+static int64_t sys_socket(FdEntry *fdt, uint64_t type) {
+    int fd = fd_alloc(fdt);
+    if (fd < 0) return -1;
+    fdt[fd].sock_peer_ip = 0;
+    fdt[fd].sock_peer_port = 0;
+    if (type == 1) {
+        fdt[fd].type = FD_TYPE_SOCK_TCP;
+        fdt[fd].pipe_idx = 0xFF;   // no tcb until connect/bind
+    } else if (type == 2) {
+        int sock = udp_bind(0);    // ephemeral port
+        if (sock < 0) { fd_close_entry(fdt, fd); return -1; }
+        fdt[fd].type = FD_TYPE_SOCK_UDP;
+        fdt[fd].pipe_idx = (uint8_t)sock;
+    } else {
+        fd_close_entry(fdt, fd);
+        return -1;
+    }
+    fdt[fd].flags = 3; // RDWR
+    return fd;
+}
+
+// Phase 52: connect(fd, ip, port) — IPs host byte order.
+static int64_t sys_connect(FdEntry *fdt, int fd, uint32_t ip, uint16_t port) {
+    if (fd < 0 || fd >= FD_MAX) return -1;
+    if (fdt[fd].type == FD_TYPE_SOCK_UDP) {
+        fdt[fd].sock_peer_ip = ip;      // connectionless: just record the peer
+        fdt[fd].sock_peer_port = port;
+        return 0;
+    }
+    if (fdt[fd].type != FD_TYPE_SOCK_TCP) return -1;
+    int sock = tcp_connect(ip, port);
+    if (sock < 0) return -1;
+    fdt[fd].pipe_idx = (uint8_t)sock;
+    // Wait (bounded) for the handshake. Enable interrupts so the timer IRQ
+    // keeps driving tcp_tick + the rx poll; the int-0x80 gate arrives with
+    // IF cleared. The task may be preempted here and resume — fine.
+    __asm__ volatile("sti");
+    uint64_t start = kernel_tick;
+    int ok = 0;
+    while (kernel_tick - start < (uint64_t)TIMER_HZ * 5) {
+        TcpState st = g_tcbs[sock].state;
+        if (st == TCP_ESTABLISHED) { ok = 1; break; }
+        if (st == TCP_CLOSED)      { break; }
+        __asm__ volatile("pause");
+    }
+    __asm__ volatile("cli");
+    return ok ? 0 : -1;
+}
+
+// Phase 52: bind(fd, port) — UDP rebinds to a fixed port; TCP does a
+// passive open (listen).
+static int64_t sys_bind(FdEntry *fdt, int fd, uint16_t port) {
+    if (fd < 0 || fd >= FD_MAX) return -1;
+    if (fdt[fd].type == FD_TYPE_SOCK_UDP) {
+        if (fdt[fd].pipe_idx != 0xFF) udp_close(fdt[fd].pipe_idx);
+        int sock = udp_bind(port);
+        if (sock < 0) { fdt[fd].pipe_idx = 0xFF; return -1; }
+        fdt[fd].pipe_idx = (uint8_t)sock;
+        return 0;
+    }
+    if (fdt[fd].type == FD_TYPE_SOCK_TCP) {
+        int sock = tcp_listen(port);
+        if (sock < 0) return -1;
+        fdt[fd].pipe_idx = (uint8_t)sock;
+        return 0;
     }
     return -1;
 }
@@ -2055,6 +2159,19 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
         } else if (frame->rax == SYS_WRITE) {
             // Phase 25: write(path_ptr, user_buf_ptr, len) -> bytes written
             frame->rax = (uint64_t)syscall_vfs_write_64(frame->rbx, frame->rcx, frame->rdx);
+        } else if (frame->rax == SYS_SOCKET) {
+            // Phase 52: socket(type) -> fd
+            FdEntry *fdt = (current_task_idx >= 0) ? task_slots[current_task_idx].fd_table : (FdEntry*)0;
+            frame->rax = fdt ? (uint64_t)sys_socket(fdt, frame->rbx) : (uint64_t)-1;
+        } else if (frame->rax == SYS_CONNECT) {
+            // Phase 52: connect(fd, ip, port)
+            FdEntry *fdt = (current_task_idx >= 0) ? task_slots[current_task_idx].fd_table : (FdEntry*)0;
+            frame->rax = fdt ? (uint64_t)sys_connect(fdt, (int)frame->rbx, (uint32_t)frame->rcx,
+                                                     (uint16_t)frame->rdx) : (uint64_t)-1;
+        } else if (frame->rax == SYS_BIND) {
+            // Phase 52: bind(fd, port)
+            FdEntry *fdt = (current_task_idx >= 0) ? task_slots[current_task_idx].fd_table : (FdEntry*)0;
+            frame->rax = fdt ? (uint64_t)sys_bind(fdt, (int)frame->rbx, (uint16_t)frame->rcx) : (uint64_t)-1;
         } else if (frame->rax == SYS_OPEN) {
             // Phase 41: open(path_ptr, flags) -> fd
             FdEntry *fdt = (current_task_idx >= 0) ? task_slots[current_task_idx].fd_table : (FdEntry*)0;

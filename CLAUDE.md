@@ -153,6 +153,8 @@ TCP (`kernel/net/tcp.c`) is arch-agnostic: the kernel registers `net_tcp_ip_outp
 
 UDP (`kernel/net/udp.c`, same arch-agnostic pattern) provides 8 sockets with `udp_bind/udp_sendto/udp_recvfrom`; the same file hosts the DHCP client (full DORA; `dhcp` CLI applies the lease via `kernel_net_apply_config()`) and DNS A-record resolver (`nslookup` CLI; server defaults to slirp's 10.0.2.3). UDP's IP transmit supports src 0.0.0.0 and 255.255.255.255 broadcast for DHCP. CLI: `udpbind/udpsend/udprecv/udpclose`, `dhcp`, `nslookup`.
 
+Userland networking (Phase 52): sockets are file descriptors. `SYS_SOCKET(87)` (type 1=TCP, 2=UDP), `SYS_CONNECT(88)`, `SYS_BIND(89)`; then plain `read`/`write`/`close` on the fd map to `tcp_recv/send` or `udp_recvfrom/sendto`. The fd table entry stores the kernel socket id in `pipe_idx` and the UDP peer in `sock_peer_ip/port`. TCP `connect` waits for the handshake with interrupts enabled (the int-0x80 gate clears IF, so it `sti`s so the timer IRQ can drive `tcp_tick`/rx-poll, then `cli`s). `userlib/netcat.c` (`/bin/netcat{32,64}`) is the demo client. Not yet: `SYS_LISTEN`/`SYS_ACCEPT` for a userland TCP server.
+
 Serial console: the timer IRQ also polls COM1 RX into the kernel CLI keyboard buffer, so `-serial stdio` (plus `-vga none` to force VGA-text CLI mode instead of the GUI) drives the shell — this is how the integration tests interact with the OS. CLI test commands: `tcphandshake connect <ip> <port>`, `tcpsend`, `tcprecv`, `tcpstat`, `tcpclose`.
 
 ### AI Integration

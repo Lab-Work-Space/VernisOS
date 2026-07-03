@@ -291,6 +291,8 @@ def main():
     parser.add_argument("--getty", default=None, help="Optional x86_64 getty ELF path")
     parser.add_argument("--init32", default=None, help="Optional x86 init ELF path (/sbin/init32)")
     parser.add_argument("--init64", default=None, help="Optional x86_64 init ELF path (/sbin/init64)")
+    parser.add_argument("--nc32", default=None, help="Optional x86 netcat ELF (/bin/netcat32)")
+    parser.add_argument("--nc64", default=None, help="Optional x86_64 netcat ELF (/bin/netcat64)")
     parser.add_argument("--login", default=None, help="Optional x86_64 login ELF path")
     args = parser.parse_args()
 
@@ -382,6 +384,17 @@ def main():
                 files.append((fs_name, next_sector, len(init_data), 1, 0x00))
                 data_blocks.append(init_data)
                 next_sector += init_sectors
+
+    # Phase 52: /bin/netcat32 + /bin/netcat64 (optional)
+    for arg_path, fs_name in ((args.nc32, "/bin/netcat32"), (args.nc64, "/bin/netcat64")):
+        if arg_path and os.path.exists(arg_path):
+            with open(arg_path, "rb") as f:
+                nc_data = f.read()
+            if nc_data:
+                nc_sectors = (len(nc_data) + 511) // 512
+                files.append((fs_name, next_sector, len(nc_data), 1, 0x00))
+                data_blocks.append(nc_data)
+                next_sector += nc_sectors
 
     # Phase 60: /sbin/getty (optional)
     if args.getty and os.path.exists(args.getty):

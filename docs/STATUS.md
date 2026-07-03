@@ -485,12 +485,20 @@ Phase 28: Shell Pipeline Support ✅ DONE
         nslookup example.com → IP จริงจาก internet ผ่าน host resolver
       └─ หมายเหตุ: พบและแก้ bug cli_printf ไม่รองรับ %u (กระทบ tcpstat เดิมด้วย)
 
-    Phase 52: Userspace Socket API ⬜ PLANNED
-      └─ SYS_SOCKET / SYS_BIND / SYS_LISTEN / SYS_ACCEPT / SYS_CONNECT
-      └─ SYS_SEND / SYS_RECV / SYS_SENDTO / SYS_RECVFROM
-      └─ Socket fd ↔ kernel TCB/UCB mapping
-      └─ vernislibc wrappers: socket(), bind(), listen(), accept(), connect(), send(), recv()
-      └─ /bin/nc (netcat) user-space tool
+    Phase 52: Userspace Socket API ✅ DONE (2026-07-03)
+      └─ FD_TYPE_SOCK_TCP/UDP ใน fd table (pipe_idx = kernel socket id,
+        + sock_peer_ip/port สำหรับ UDP) — sockets เป็น fd จริง
+      └─ SYS_SOCKET(87) type 1=TCP 2=UDP, SYS_CONNECT(88), SYS_BIND(89)
+      └─ read()/write()/close() ทำงานบน socket fd → tcp_recv/send, udp_recvfrom/sendto,
+        tcp_close/udp_close (BSD-style: socket คือ fd ที่ read/write ได้)
+      └─ TCP connect รอ handshake แบบ bounded (sti ให้ timer IRQ ขับ tcp_tick/rx,
+        cli กลับ) — int 0x80 gate มาแบบ IF=0
+      └─ recv ที่ยังไม่มีข้อมูล → yield quantum (userland poll ด้วย yield())
+      └─ userlib wrappers: socket/connect/bind_port (+ read/write/close เดิม)
+      └─ /bin/netcat{32,64}: TCP client เชื่อม 10.0.2.2:7000 ผ่าน slirp
+      └─ Verified ทั้ง x86+x64: exec netcat → connect → send 29B (host รับได้จริง)
+        → recv echo กลับมาถูกต้อง; TCP suite 11/11, DHCP/init ปกติ
+      └─ ยังไม่ทำ: SYS_LISTEN/ACCEPT (TCP server จาก userland), sendto/recvfrom แยก
 
     Phase 62: Per-Process Address Spaces ✅ DONE (2026-07-03)
       └─ Frame free-list (2048 slots) เพิ่มบน bump allocator — exec/exit/kill
