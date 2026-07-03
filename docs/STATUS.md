@@ -684,6 +684,11 @@ Phase 28: Shell Pipeline Support ✅ DONE
         → splitter scan เข้า stack garbage, token สุดท้ายอ่านเลย buffer (echo พ่น
         garbage bytes) — memset work ก่อน copy
       └─ Verified 9/9 ทั้ง x86+x64: ; && || short-circuit + pipe ผสม, ไม่มี garbage
+      └─ GUI: ทดสอบพิมพ์ operator ในหน้าต่าง terminal จริง — ทำงานครบ
+      └─ Bug ที่เจอตอนทดสอบ GUI (แก้แล้ว): GUI event loop ทิ้ง KeyRelease ทั้งหมด
+        → terminal ไม่เห็น shift break code (0xAA/0xB6) → SHIFT ค้างหลังกดปุ่มที่ต้อง
+        shift (& | ตัวพิมพ์ใหญ่) ตัวอักษรถัดไปเป็นตัวใหญ่หมด; forward release ให้
+        terminal อัปเดต modifier (ไม่ trigger redraw)
 
 ## ภาพรวมสถาปัตยกรรม
 

@@ -120,7 +120,14 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
                 had_key = true;
                 handle_key_press(ev.scancode);
             }
-            event::EventKind::KeyRelease | event::EventKind::None => {}
+            event::EventKind::KeyRelease => {
+                // Forward releases too: the terminal tracks Shift via the
+                // 0xAA/0xB6 break codes. Dropping them left Shift stuck on
+                // after any shifted key (& | uppercase...). No redraw needed
+                // (had_key stays false) — this only updates modifier state.
+                handle_key_press(ev.scancode);
+            }
+            event::EventKind::None => {}
         }
     }
 
