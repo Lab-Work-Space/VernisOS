@@ -635,6 +635,11 @@ Phase 28: Shell Pipeline Support ✅ DONE
         yield quantum ที่เหลือทันที (ticks_remaining = 1) + worker quantum 2→1
       └─ Verified: GUI พิมพ์ date/winmove/uptime ไม่มี execve spam เลย,
         TCP suite 11/11 (text-mode serial CLI ไม่กระทบ)
+      └─ แก้ cursor ค้างเมื่อขยับเมาส์เร็ว: cursor_move_incremental เคยคืน
+        union rect ของตำแหน่งเก่า+ใหม่ → สะบัดเมาส์เร็ว = union เกือบเต็มจอ
+        = copy หลาย MB ไป framebuffer ทุก tick (cost แปรตามความเร็วเมาส์!)
+        → ตอนนี้ present สอง rect เล็ก (จุดเก่า, จุดใหม่) แยกกัน — cost คงที่
+        ~12x19 px ไม่ว่าเมาส์เร็วแค่ไหน; ทดสอบ 120 zigzag moves ไม่มี trail
       └─ /sbin/getty: display login prompt, fork + exec /bin/login
       └─ /bin/login: authenticate against /etc/shadow, setuid, exec shell
       └─ setuid / setgid syscalls (SYS_SETUID=79, SYS_SETGID=80)

@@ -157,7 +157,13 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
                 }
                 LAST_CURSOR_X = mx;
                 LAST_CURSOR_Y = my;
-        if let Some((dx, dy, dw, dh)) = cursor::cursor_move_incremental(mx, my) {
+        // Two small presents (old spot, new spot) — never their union,
+        // which grows with mouse speed and made fast flicks freeze.
+        let (old_r, new_r) = cursor::cursor_move_incremental(mx, my);
+        if let Some((dx, dy, dw, dh)) = old_r {
+            compositor::compositor_present_rect(dx, dy, dw, dh);
+        }
+        if let Some((dx, dy, dw, dh)) = new_r {
             compositor::compositor_present_rect(dx, dy, dw, dh);
         }
         return;

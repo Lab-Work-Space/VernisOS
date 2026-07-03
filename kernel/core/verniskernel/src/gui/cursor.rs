@@ -146,31 +146,11 @@ unsafe fn cursor_restore_under() {
     }
 }
 
-unsafe fn cursor_union_rect(nx: i32, ny: i32, nw: u32, nh: u32) -> Option<(i32, i32, u32, u32)> {
-    let comp = compositor::compositor_get();
-    let old = if CURSOR_HAS_SAVED {
-        rect_clip(CURSOR_X, CURSOR_Y, CURSOR_W_CLIP, CURSOR_H_CLIP, comp.width, comp.height)
-    } else {
-        None
-    };
-    let newr = rect_clip(nx, ny, nw, nh, comp.width, comp.height);
-
-    match (old, newr) {
-        (None, None) => None,
-        (Some(r), None) | (None, Some(r)) => Some(r),
-        (Some((ox, oy, ow, oh)), Some((nx2, ny2, nw2, nh2))) => {
-            let x0 = if ox < nx2 { ox } else { nx2 };
-            let y0 = if oy < ny2 { oy } else { ny2 };
-            let ox1 = ox.saturating_add(ow as i32);
-            let oy1 = oy.saturating_add(oh as i32);
-            let nx1 = nx2.saturating_add(nw2 as i32);
-            let ny1 = ny2.saturating_add(nh2 as i32);
-            let x1 = if ox1 > nx1 { ox1 } else { nx1 };
-            let y1 = if oy1 > ny1 { oy1 } else { ny1 };
-            Some((x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
-        }
-    }
-}
+// NOTE: deliberately no old∪new union rect here. A fast mouse flick puts
+// the old and new cursor positions far apart; presenting their union means
+// copying a near-fullscreen rect to the framebuffer every tick — present
+// cost scaled with mouse speed and froze the GUI during fast movement.
+// Present the two small rects separately instead.
 
 fn draw_cursor_shape(x: i32, y: i32) {
     unsafe {
@@ -220,12 +200,22 @@ pub unsafe fn cursor_draw_fresh(x: i32, y: i32) {
     draw_cursor_shape(x, y);
 }
 
-/// Move cursor incrementally: restore previous underlay, draw at new position,
-/// and return a dirty rectangle that covers both old and new cursor areas.
-pub unsafe fn cursor_move_incremental(x: i32, y: i32) -> Option<(i32, i32, u32, u32)> {
-    let dirty = cursor_union_rect(x, y, CURSOR_W, CURSOR_H);
+/// Move cursor incrementally: restore previous underlay, draw at new
+/// position, and return the two dirty rects (old area, new area) for the
+/// caller to present individually.
+pub unsafe fn cursor_move_incremental(
+    x: i32,
+    y: i32,
+) -> (Option<(i32, i32, u32, u32)>, Option<(i32, i32, u32, u32)>) {
+    let comp = compositor::compositor_get();
+    let old = if CURSOR_HAS_SAVED {
+        rect_clip(CURSOR_X, CURSOR_Y, CURSOR_W_CLIP, CURSOR_H_CLIP, comp.width, comp.height)
+    } else {
+        None
+    };
     cursor_restore_under();
     cursor_save_under(x, y);
     draw_cursor_shape(x, y);
-    dirty
+    let newr = rect_clip(x, y, CURSOR_W, CURSOR_H, comp.width, comp.height);
+    (old, newr)
 }
