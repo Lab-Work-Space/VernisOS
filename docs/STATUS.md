@@ -625,6 +625,16 @@ Phase 28: Shell Pipeline Support ✅ DONE
       ทั้ง x86+x64 + per-task uid/gid/umask/cwd (inherit ผ่าน fork) + userlib wrappers;
       setuid/setgid เฉพาะ root เปลี่ยนได้, chdir ตรวจ path กับ VFS
       └─ ยังเหลือ: getty/login ยังไม่เรียกใช้ syscalls เหล่านี้ (boot ยัง launch vsh ตรง)
+
+    Phase 62: Input Routing + Scheduler Smoothness ✅ DONE (2026-07-03)
+      └─ แก้ "execve failed" spam ใน GUI: keyboard IRQ เคยป้อนทั้ง GUI terminal
+        และ TTY พร้อมกัน → vsh อ่าน keystroke เดียวกันแล้วพยายาม exec ทุกคำสั่ง
+        → ตอนนี้ gate TTY push เมื่อ display_mode == 2 (GUI คือ console)
+      └─ แก้ cursor กระตุก/ภาพค้าง: vsh busy-poll stdin กินเต็ม quantum ทุกรอบ
+        round-robin → GUI ค้าง ~25ms เป็นช่วงๆ; ตอนนี้ TTY read ที่ไม่มีข้อมูล
+        yield quantum ที่เหลือทันที (ticks_remaining = 1) + worker quantum 2→1
+      └─ Verified: GUI พิมพ์ date/winmove/uptime ไม่มี execve spam เลย,
+        TCP suite 11/11 (text-mode serial CLI ไม่กระทบ)
       └─ /sbin/getty: display login prompt, fork + exec /bin/login
       └─ /bin/login: authenticate against /etc/shadow, setuid, exec shell
       └─ setuid / setgid syscalls (SYS_SETUID=79, SYS_SETGID=80)

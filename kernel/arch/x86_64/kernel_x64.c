@@ -1052,8 +1052,12 @@ static void keyboard_handle_scancode(uint8_t scancode) {
         kbd_state.buffer[kbd_state.write_pos] = c;
         kbd_state.write_pos = next;
     }
-    // Phase 42: also push to TTY for user-space stdin
-    tty_push_char(&kernel_tty0, c);
+    // Phase 42: also push to TTY for user-space stdin — but NOT in GUI
+    // mode: there the GUI terminal is the console, and feeding the TTY too
+    // makes vsh consume/execve every typed CLI command ("execve failed"
+    // spam in the shared output).
+    if (display_mode != 2)
+        tty_push_char(&kernel_tty0, c);
 }
 
 // Serial console input: poll COM1 RX and inject ASCII into the kernel CLI
@@ -1400,6 +1404,12 @@ static int64_t sys_read_fd(FdEntry *fdt, int fd, uint64_t buf_ptr, uint64_t coun
         if (n > 0) {
             char *ubuf = (char *)buf_ptr;
             for (int i = 0; i < n; i++) ubuf[i] = tmp[i];
+        } else if (current_task_idx >= 0) {
+            // Nothing to read: yield the rest of this time slice. Without
+            // this, a shell polling stdin burns its whole quantum every
+            // round-robin rotation and the GUI render loop visibly stalls
+            // (jerky cursor, frozen frames).
+            task_slots[current_task_idx].ticks_remaining = 1;
         }
         return n;
     }
@@ -4473,7 +4483,7 @@ void kernel_main(void) {
         uint32_t worker_pid = scheduler_create_process(kernel_scheduler, 9, "worker");
         // Small quantum: the worker only hlt-loops — a 24-tick (100ms) slice
         // starves the GUI compositor of wall time (round-robin, no blocking)
-        int worker_idx = task_create(phase18_worker_entry, worker_pid, 2);
+        int worker_idx = task_create(phase18_worker_entry, worker_pid, 1);
         if (worker_idx >= 0) {
             serial_print("[phase18] worker task created (pid=");
             serial_print_dec(worker_pid);

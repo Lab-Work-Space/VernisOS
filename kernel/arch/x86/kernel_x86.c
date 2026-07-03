@@ -807,8 +807,9 @@ static void keyboard_irq_handler(void) {
 
     if (c >= 'a' && c <= 'z' && kbd.caps_lock) c = (char)(c - 32);
     if (c) kbd.buf[kbd.write_pos++] = c;
-    // Phase 42: also push to TTY for user-space stdin
-    if (c) tty_push_char_32(&kernel_tty0_32, c);
+    // Phase 42: also push to TTY for user-space stdin — but NOT in GUI
+    // mode (see x64: prevents vsh from consuming GUI terminal input).
+    if (c && display_mode != 2) tty_push_char_32(&kernel_tty0_32, c);
 }
 
 // Serial console input: poll COM1 RX and inject ASCII into the kernel CLI
@@ -1180,8 +1181,15 @@ static int32_t sys_read_fd_32(uint32_t fd_num, uint32_t buf_ptr, uint32_t count)
     if (!user_ptr_range_valid_32(buf_ptr, count)) return -1;
     FdEntry32 *e = &task_slots[current_task_idx].fd_table[fd_num];
     if (e->type == FD_TYPE_NONE) return -1;
-    if (e->type == FD_TYPE_TTY)
-        return tty_read_32(&kernel_tty0_32, (char *)buf_ptr, (int)count);
+    if (e->type == FD_TYPE_TTY) {
+        int n = tty_read_32(&kernel_tty0_32, (char *)buf_ptr, (int)count);
+        if (n <= 0 && current_task_idx >= 0) {
+            // Nothing to read: yield the rest of this time slice so a
+            // stdin-polling shell doesn't starve the GUI render loop
+            task_slots[current_task_idx].ticks_remaining = 1;
+        }
+        return n;
+    }
     if (e->type == FD_TYPE_PIPE_R) {
         if (e->pipe_idx >= MAX_PIPES) return -1;
         KernelPipe32 *p = &kernel_pipes_32[e->pipe_idx];
@@ -4041,7 +4049,7 @@ void kernel_main(void) {
         uint32_t worker_pid = scheduler_create_process(kernel_scheduler, 9, "worker");
         // Small quantum: the worker only hlt-loops — a 24-tick (100ms) slice
         // starves the GUI compositor of wall time (round-robin, no blocking)
-        int worker_idx = task_create_32(phase18_worker_entry_32, worker_pid, 2);
+        int worker_idx = task_create_32(phase18_worker_entry_32, worker_pid, 1);
         if (worker_idx >= 0) {
             serial_print("[phase18] worker task created (pid=");
             serial_print_dec(worker_pid);
