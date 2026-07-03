@@ -586,6 +586,8 @@ static volatile uint32_t kernel_tick = 0;
 #define SYS_SOCKET    87    // Phase 52
 #define SYS_CONNECT   88
 #define SYS_BIND      89
+#define SYS_AUTH      90
+#define SYS_MKDIR2    91
 
 // Perf counters (STATUS item 23) — read via kernel_perf_get() for the CLI
 static uint32_t g_perf_syscalls;
@@ -604,6 +606,10 @@ static int user_ptr_range_valid_32(uint32_t addr, uint32_t len) {
     if (end < addr) return 0;
     return addr >= USER_VADDR_MIN_32 && end <= USER_VADDR_MAX_32;
 }
+
+extern int userdb_authenticate(const char *username, const char *password);
+extern int userdb_find_uid(const char *username);
+extern int kfs_mkdir(const char *path);
 
 static int copy_user_path_32(char *dst, uint32_t user_ptr) {
     if (!dst || user_ptr == 0) return -1;
@@ -826,11 +832,18 @@ static void keyboard_irq_handler(void) {
 // keyboard buffer, so `-serial stdio` works as a console for headless use
 // and integration tests. Deliberately not fed to the TTY: the user shell
 // (vsh) reads TTY stdin and would consume/echo the same bytes.
+// Phase 60: console owner. 0 = kernel CLI (serial -> keyboard buffer),
+// 1 = userland TTY (serial -> tty, for the getty/login/vsh chain).
+volatile int g_tty_console = 0;
+void kernel_set_tty_console(int on) { g_tty_console = on ? 1 : 0; }
+int  kernel_get_tty_console(void) { return g_tty_console; }
+
 static void serial_console_rx_poll(void) {
     while (inb(COM1 + 5) & 0x01) {
         char c = (char)inb(COM1);
         if (c == '\r') c = '\n';
         if (c == 127) c = '\b';
+        if (g_tty_console) { tty_push_char_32(&kernel_tty0_32, c); continue; }
         kbd.buf[kbd.write_pos++] = c;
     }
 }
@@ -1336,6 +1349,21 @@ static int32_t sys_bind_32(uint32_t fd, uint32_t port) {
     return -1;
 }
 
+static int32_t sys_auth_32(uint32_t user_ptr, uint32_t pass_ptr) {
+    char user[SYS_IO_PATH_MAX], pass[SYS_IO_PATH_MAX];
+    if (copy_user_path_32(user, user_ptr) < 0) return -1;
+    if (pass_ptr == 0) pass[0] = '\0';
+    else if (copy_user_path_32(pass, pass_ptr) < 0) return -1;
+    if (userdb_authenticate(user, pass_ptr ? pass : "") < 0) return -1;
+    return userdb_find_uid(user);
+}
+
+static int32_t sys_mkdir2_32(uint32_t path_ptr) {
+    char path[SYS_IO_PATH_MAX];
+    if (copy_user_path_32(path, path_ptr) < 0) return -1;
+    return (kfs_mkdir(path) < 0) ? -1 : 0;
+}
+
 static int32_t sys_close_32(uint32_t fd_num) {
     if (current_task_idx < 0 || fd_num >= FD_MAX) return -1;
     FdEntry32 *e = &task_slots[current_task_idx].fd_table[fd_num];
@@ -1753,6 +1781,10 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
             ret = sys_connect_32(a1, a2, a3);
         } else if (num == SYS_BIND) {
             ret = sys_bind_32(a1, a2);
+        } else if (num == SYS_AUTH) {
+            ret = sys_auth_32(a1, a2);
+        } else if (num == SYS_MKDIR2) {
+            ret = sys_mkdir2_32(a1);
         } else if (num == SYS_OPEN) {
             ret = sys_open_32(a1, a2);
         } else if (num == SYS_READ_FD) {

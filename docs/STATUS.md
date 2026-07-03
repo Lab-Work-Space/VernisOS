@@ -72,7 +72,7 @@
 | 16 | **Network Stack** | ✅ ใช้งานได้ — E1000 + ARP + IPv4 + ICMP + TCP + UDP + DHCP + DNS + userland socket fds (Phase 49-52, ทดสอบ end-to-end กับ host+internet จริง); ที่เหลือ: TCP sliding window/data retransmit, SYS_LISTEN/ACCEPT | สูง |
 | 17 | **AC97 / Intel HDA Audio** | ❌ ยังไม่ทำ — ไม่มีโค้ด AC97/HDA ใน repo | กลาง |
 | 18 | **FAT32 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/fat32.c เป็น stub 3 บรรทัด | กลาง |
-| 19 | **Multiuser (getty/login)** | ⚠️ PARTIAL — getty/login ELF + Phase 60 syscalls (setuid/getuid/chdir/umask 79-85) มีแล้ว แต่ boot ยัง launch init→vsh ตรง (ไม่ผ่าน getty); login hardcode root/vernis + /bin/vsh64, ไม่เรียก setuid, ไม่มี home dir | สูง |
+| 19 | **Multiuser (getty/login)** | ✅ ทำงานแล้ว (2026-07-03) — init→getty→login→vsh chain: login auth กับ /etc/shadow (SHA-256) ผ่าน SYS_AUTH, setuid/setgid, สร้าง+เข้า home dir (/root, /home/<user>), exec arch-shell; ทดสอบ root/admin/user ทั้ง x86+x64 | สูง |
 | 21 | **ext2 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ext2.c เป็น stub 3 บรรทัด | กลาง |
 | 22 | **NTFS Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ntfs.c เป็น stub 3 บรรทัด | กลาง |
 | 15 | **Framebuffer Graphics / GUI** | ✅ ทำงานแล้ว — auto-res double-buffered GUI, cursor-only fast path, dirty rect tracking; glassmorphism ทำให้ full compose ต่อ event (ดู Phase 61) | กลาง |
@@ -650,11 +650,21 @@ Phase 28: Shell Pipeline Support ✅ DONE
           mouse จริงใช้งานได้; 9-bit sign bits แก้แล้ว (2026-07-03): mouse_irq_handler
           อ่าน sign จาก flags bit 4/5, FFI ขยายเป็น i32
 
-    Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — syscalls ครบแล้ว (2026-07-03):
-      SYS_SETUID(79)/SETGID(80)/GETUID(81)/GETGID(82)/CHDIR(83)/GETCWD(84)/UMASK(85)
-      ทั้ง x86+x64 + per-task uid/gid/umask/cwd (inherit ผ่าน fork) + userlib wrappers;
-      setuid/setgid เฉพาะ root เปลี่ยนได้, chdir ตรวจ path กับ VFS
-      └─ ยังเหลือ: getty/login ยังไม่เรียกใช้ syscalls เหล่านี้ (boot ยัง launch vsh ตรง)
+    Phase 60: Multiuser (getty/login) ✅ DONE (2026-07-03)
+      └─ syscalls: SETUID(79)/SETGID(80)/GETUID(81)/GETGID(82)/CHDIR(83)/GETCWD(84)/
+        UMASK(85) + Phase-60.5: SYS_AUTH(90) (userdb+SHA-256 verify -> uid),
+        SYS_MKDIR2(91) (userland mkdir) — ทั้ง x86+x64
+      └─ chain จริง: init(PID1) → fork → /sbin/getty{32,64} (banner) → exec
+        /bin/login{32,64} → auth /etc/shadow → setgid/setuid → mkdir+chdir home →
+        exec /bin/vsh{32,64}; init respawn เมื่อ shell ออก
+      └─ login: อ่าน user/pass จาก TTY, auth() syscall, home = /root (uid 0) หรือ
+        /home/<user>, พิมพ์ uid+home ยืนยัน
+      └─ console owner switch: kernel CLI เป็น default (serial->kbd buffer, test เดิม
+        ใช้ได้); คำสั่ง `console` ส่ง serial ให้ userland TTY (getty/login/vsh)
+      └─ Verified ทั้ง x86+x64: root(uid0,/root NO_PASSWORD), admin/admin(uid1,
+        /home/admin, SHA-256), user/user(uid2), wrong-pass ถูก reject; TCP 11/11,
+        GUI/netcat ปกติ
+      └─ ยังไม่ทำ: password echo suppression, /etc/passwd shell field, logout->login loop
 
     Phase 62: Input Routing + Scheduler Smoothness ✅ DONE (2026-07-03)
       └─ แก้ "execve failed" spam ใน GUI: keyboard IRQ เคยป้อนทั้ง GUI terminal

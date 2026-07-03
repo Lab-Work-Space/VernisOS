@@ -288,12 +288,14 @@ def main():
     parser.add_argument("-o", "--output", default="make/vernisfs.bin", help="Output file")
     parser.add_argument("--vsh64", default="make/user/vsh64.elf", help="Optional x86_64 vsh ELF path")
     parser.add_argument("--vsh32", default="make/user/vsh32.elf", help="Optional i686 vsh ELF path")
-    parser.add_argument("--getty", default=None, help="Optional x86_64 getty ELF path")
+    parser.add_argument("--getty32", default=None, help="Optional x86 getty ELF (/sbin/getty32)")
+    parser.add_argument("--getty64", default=None, help="Optional x86_64 getty ELF (/sbin/getty64)")
     parser.add_argument("--init32", default=None, help="Optional x86 init ELF path (/sbin/init32)")
     parser.add_argument("--init64", default=None, help="Optional x86_64 init ELF path (/sbin/init64)")
     parser.add_argument("--nc32", default=None, help="Optional x86 netcat ELF (/bin/netcat32)")
     parser.add_argument("--nc64", default=None, help="Optional x86_64 netcat ELF (/bin/netcat64)")
-    parser.add_argument("--login", default=None, help="Optional x86_64 login ELF path")
+    parser.add_argument("--login32", default=None, help="Optional x86 login ELF (/bin/login32)")
+    parser.add_argument("--login64", default=None, help="Optional x86_64 login ELF (/bin/login64)")
     args = parser.parse_args()
 
     # === Build default files ===
@@ -396,25 +398,17 @@ def main():
                 data_blocks.append(nc_data)
                 next_sector += nc_sectors
 
-    # Phase 60: /sbin/getty (optional)
-    if args.getty and os.path.exists(args.getty):
-        with open(args.getty, "rb") as f:
-            getty_data = f.read()
-        if getty_data:
-            getty_sectors = (len(getty_data) + 511) // 512
-            files.append(("/sbin/getty", next_sector, len(getty_data), 1, 0x00))
-            data_blocks.append(getty_data)
-            next_sector += getty_sectors
-
-    # Phase 60: /bin/login (optional)
-    if args.login and os.path.exists(args.login):
-        with open(args.login, "rb") as f:
-            login_data = f.read()
-        if login_data:
-            login_sectors = (len(login_data) + 511) // 512
-            files.append(("/bin/login", next_sector, len(login_data), 1, 0x00))
-            data_blocks.append(login_data)
-            next_sector += login_sectors
+    # Phase 60: getty + login (per-arch)
+    for arg_path, fs_name in ((args.getty32, "/sbin/getty32"), (args.getty64, "/sbin/getty64"),
+                              (args.login32, "/bin/login32"), (args.login64, "/bin/login64")):
+        if arg_path and os.path.exists(arg_path):
+            with open(arg_path, "rb") as f:
+                blob = f.read()
+            if blob:
+                nsec = (len(blob) + 511) // 512
+                files.append((fs_name, next_sector, len(blob), 1, 0x00))
+                data_blocks.append(blob)
+                next_sector += nsec
 
     # === Build image ===
 

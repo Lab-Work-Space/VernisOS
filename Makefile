@@ -464,9 +464,9 @@ $(KERNEL_X64_ACPI): kernel/drivers/acpi.c include/acpi.h | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
 
 # ==== VernisFS image ====
-$(VFS_BIN): ai/tools/mkfs_vernis.py $(USER_VSH_X86_ELF) $(USER_VSH_X64_ELF) $(USER_GETTY_X64_ELF) $(USER_LOGIN_X64_ELF) $(USER_INIT_X86_ELF) $(USER_INIT_X64_ELF) $(USER_NC_X86_ELF) $(USER_NC_X64_ELF) | prepare
+$(VFS_BIN): ai/tools/mkfs_vernis.py $(USER_VSH_X86_ELF) $(USER_VSH_X64_ELF) $(USER_GETTY_X86_ELF) $(USER_GETTY_X64_ELF) $(USER_LOGIN_X86_ELF) $(USER_LOGIN_X64_ELF) $(USER_INIT_X86_ELF) $(USER_INIT_X64_ELF) $(USER_NC_X86_ELF) $(USER_NC_X64_ELF) | prepare
 	@echo "Creating VernisFS image..."
-	python3 ai/tools/mkfs_vernis.py -o $(VFS_BIN) --vsh32 $(USER_VSH_X86_ELF) --vsh64 $(USER_VSH_X64_ELF) --getty $(USER_GETTY_X64_ELF) --login $(USER_LOGIN_X64_ELF) --init32 $(USER_INIT_X86_ELF) --init64 $(USER_INIT_X64_ELF) --nc32 $(USER_NC_X86_ELF) --nc64 $(USER_NC_X64_ELF)
+	python3 ai/tools/mkfs_vernis.py -o $(VFS_BIN) --vsh32 $(USER_VSH_X86_ELF) --vsh64 $(USER_VSH_X64_ELF) --getty32 $(USER_GETTY_X86_ELF) --getty64 $(USER_GETTY_X64_ELF) --login32 $(USER_LOGIN_X86_ELF) --login64 $(USER_LOGIN_X64_ELF) --init32 $(USER_INIT_X86_ELF) --init64 $(USER_INIT_X64_ELF) --nc32 $(USER_NC_X86_ELF) --nc64 $(USER_NC_X64_ELF)
 
 # ==== User-space programs (Phase 44/45) ====
 $(USER_CRT0_X86_O): $(USER_CRT0_X86) | prepare
@@ -495,10 +495,10 @@ $(USER_VSH_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_VSH_X64_O) $(U
 
 # Phase 60: getty + login (x86)
 $(USER_GETTY_X86_O): $(USER_GETTY_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
-	$(CC_X86) $(USER_CFLAGS_X86) -c $< -o $@
+	$(CC_X86) $(USER_CFLAGS_X86) -DLOGIN_PATH='"/bin/login32"' -c $< -o $@
 
 $(USER_LOGIN_X86_O): $(USER_LOGIN_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
-	$(CC_X86) $(USER_CFLAGS_X86) -c $< -o $@
+	$(CC_X86) $(USER_CFLAGS_X86) -DSHELL_PATH='"/bin/vsh32"' -c $< -o $@
 
 $(USER_GETTY_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_GETTY_X86_O) $(USER_LD_X86) | prepare
 	$(LD_X86) -T $(USER_LD_X86) -m elf_i386 --gc-sections $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_GETTY_X86_O) -o $@
@@ -508,10 +508,10 @@ $(USER_LOGIN_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_LOGIN_X86_O)
 
 # Phase 60: getty + login (x64)
 $(USER_GETTY_X64_O): $(USER_GETTY_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
-	$(CC_X64) $(USER_CFLAGS_X64) -c $< -o $@
+	$(CC_X64) $(USER_CFLAGS_X64) -DLOGIN_PATH='"/bin/login64"' -c $< -o $@
 
 $(USER_LOGIN_X64_O): $(USER_LOGIN_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
-	$(CC_X64) $(USER_CFLAGS_X64) -c $< -o $@
+	$(CC_X64) $(USER_CFLAGS_X64) -DSHELL_PATH='"/bin/vsh64"' -c $< -o $@
 
 $(USER_GETTY_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_GETTY_X64_O) $(USER_LD_X64) | prepare
 	$(LD_X64) -T $(USER_LD_X64) -m elf_x86_64 --gc-sections $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_GETTY_X64_O) -o $@
@@ -521,10 +521,10 @@ $(USER_LOGIN_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_LOGIN_X64_O)
 
 # ==== Phase 53: init (PID 1) ====
 $(USER_INIT_X86_O): $(USER_INIT_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
-	$(CC_X86) $(USER_CFLAGS_X86) -DSHELL_PATH='"/bin/vsh32"' -c $< -o $@
+	$(CC_X86) $(USER_CFLAGS_X86) -DSHELL_PATH='"/sbin/getty32"' -c $< -o $@
 
 $(USER_INIT_X64_O): $(USER_INIT_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
-	$(CC_X64) $(USER_CFLAGS_X64) -DSHELL_PATH='"/bin/vsh64"' -c $< -o $@
+	$(CC_X64) $(USER_CFLAGS_X64) -DSHELL_PATH='"/sbin/getty64"' -c $< -o $@
 
 $(USER_INIT_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_INIT_X86_O) $(USER_LD_X86) | prepare
 	$(LD_X86) -T $(USER_LD_X86) -m elf_i386 --gc-sections $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_INIT_X86_O) -o $@

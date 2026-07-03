@@ -246,6 +246,15 @@ static int cli_cmd_slots(CliSession *session, const ParsedCommand *cmd) {
     return 0;
 }
 
+static int cli_cmd_console(CliSession *session, const ParsedCommand *cmd) {
+    (void)session; (void)cmd;
+    extern void kernel_set_tty_console(int on);
+    cli_printf("Handing serial console to the userland login (getty).\n");
+    cli_printf("Reboot to return to the kernel CLI.\n");
+    kernel_set_tty_console(1);
+    return 0;
+}
+
 static int cli_cmd_perf(CliSession *session, const ParsedCommand *cmd) {
     (void)session; (void)cmd;
     extern uint32_t kernel_perf_get(int idx);
@@ -593,6 +602,7 @@ static const CliBuiltinCommand BUILTIN_COMMANDS[] = {
     { "dhcp",     "Configure IP via DHCP",    cli_cmd_dhcp,     CLI_PRIV_USER  },
     { "nslookup", "Resolve hostname (DNS)",   cli_cmd_nslookup, CLI_PRIV_USER  },
     { "perf",     "Show kernel perf counters", cli_cmd_perf,    CLI_PRIV_USER  },
+    { "console",  "Hand serial to userland login", cli_cmd_console, CLI_PRIV_USER },
     { "slots",    "Show C task slots (debug)", cli_cmd_slots,   CLI_PRIV_USER  },
 };
 
@@ -2000,6 +2010,16 @@ int cli_readline(char *buf, size_t max_len) {
 
     while (1) {
         char c = '\0';
+        // Phase 60: while the serial console is handed to the userland TTY
+        // (getty/login/vsh), the kernel CLI must not consume input.
+        {
+            extern int kernel_get_tty_console(void);
+            if (kernel_get_tty_console()) {
+                kernel_idle_work();
+                __asm__ volatile("hlt");
+                continue;
+            }
+        }
         if (!keyboard_read_char(&c)) {
             if (!serial_read_char(&c)) {
                 kernel_idle_work();   // process deferred AI work

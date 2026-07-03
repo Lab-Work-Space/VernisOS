@@ -31,6 +31,8 @@
 #define SYS_SOCKET    87
 #define SYS_CONNECT   88
 #define SYS_BIND      89
+#define SYS_AUTH      90
+#define SYS_MKDIR2    91
 #define SOCK_STREAM   1     /* TCP */
 #define SOCK_DGRAM    2     /* UDP */
 
@@ -164,6 +166,15 @@ static inline int connect(int fd, unsigned int ip, unsigned short port) {
 
 static inline int bind_port(int fd, unsigned short port) {
     return (int)_syscall3(SYS_BIND, (size_t)fd, (size_t)port, 0);
+}
+
+/* Phase 60: authenticate against /etc/shadow -> uid, or -1 */
+static inline int auth(const char *user, const char *pass) {
+    return (int)_syscall3(SYS_AUTH, (size_t)user, (size_t)pass, 0);
+}
+
+static inline int mkdir_sys(const char *path) {
+    return (int)_syscall3(SYS_MKDIR2, (size_t)path, 0, 0);
 }
 
 static inline void *sbrk(int increment) {

@@ -694,6 +694,8 @@ static void pic_send_eoi(uint8_t irq) {
 #define SYS_SOCKET    87    // Phase 52: socket(type) 1=TCP 2=UDP -> fd
 #define SYS_CONNECT   88    // Phase 52: connect(fd, ip, port)
 #define SYS_BIND      89    // Phase 52: bind(fd, port)
+#define SYS_AUTH      90    // Phase 60: auth(user, pass) -> uid or -1
+#define SYS_MKDIR2    91    // Phase 60: mkdir(path) -> 0/-1 (userland)
 
 // Perf counters (STATUS item 23) — read via kernel_perf_get() for the CLI
 static uint64_t g_perf_syscalls;
@@ -1074,11 +1076,18 @@ static void keyboard_handle_scancode(uint8_t scancode) {
 // keyboard buffer, so `-serial stdio` works as a console for headless use
 // and integration tests. Deliberately not fed to the TTY: the user shell
 // (vsh) reads TTY stdin and would consume/echo the same bytes.
+// Phase 60: console owner. 0 = kernel CLI (serial -> keyboard buffer),
+// 1 = userland TTY (serial -> tty, for the getty/login/vsh chain).
+volatile int g_tty_console = 0;
+void kernel_set_tty_console(int on) { g_tty_console = on ? 1 : 0; }
+int  kernel_get_tty_console(void) { return g_tty_console; }
+
 static void serial_console_rx_poll(void) {
     while (inb(SERIAL_COM1 + 5) & 0x01) {
         char c = (char)inb(SERIAL_COM1);
         if (c == '\r') c = '\n';
         if (c == 127) c = '\b';
+        if (g_tty_console) { tty_push_char(&kernel_tty0, c); continue; }
         uint32_t next = (kbd_state.write_pos + 1) % KBD_BUFFER_SIZE;
         if (next != kbd_state.read_pos) {
             kbd_state.buffer[kbd_state.write_pos] = c;
@@ -1327,6 +1336,9 @@ typedef struct {
 static TaskSlot  task_slots[MAX_TASKS];
 static int       current_task_idx      = -1;
 void *memcpy(void *dest, const void *src, unsigned long n);
+extern int userdb_authenticate(const char *username, const char *password);
+extern int userdb_find_uid(const char *username);
+extern int kfs_mkdir(const char *path);
 // Per-process address-space helpers (defined in the paging section below)
 static uint64_t *paging_get_kernel_pml4_ptr(void);
 uint64_t *paging_create_address_space(uint64_t *src_pml4);
@@ -1603,6 +1615,24 @@ static int64_t sys_close(FdEntry *fdt, int fd) {
     if (fd < 0 || fd >= FD_MAX || fdt[fd].type == FD_TYPE_NONE) return -1;
     fd_close_entry(fdt, fd);
     return 0;
+}
+
+// Phase 60: auth(user_ptr, pass_ptr) -> uid (userdb index) or -1.
+// Verifies against /etc/shadow (SHA-256) via the kernel user DB.
+static int64_t sys_auth(uint64_t user_ptr, uint64_t pass_ptr) {
+    char user[SYS_IO_PATH_MAX], pass[SYS_IO_PATH_MAX];
+    if (copy_user_path_64(user, user_ptr) < 0) return -1;
+    if (pass_ptr == 0) { pass[0] = '\0'; }
+    else if (copy_user_path_64(pass, pass_ptr) < 0) return -1;
+    if (userdb_authenticate(user, pass_ptr ? pass : "") < 0) return -1;
+    return (int64_t)userdb_find_uid(user);
+}
+
+// Phase 60: mkdir(path_ptr) -> 0/-1 (userland home-dir creation)
+static int64_t sys_mkdir2(uint64_t path_ptr) {
+    char path[SYS_IO_PATH_MAX];
+    if (copy_user_path_64(path, path_ptr) < 0) return -1;
+    return (kfs_mkdir(path) < 0) ? -1 : 0;
 }
 
 static int64_t sys_dup(FdEntry *fdt, int oldfd) {
@@ -2172,6 +2202,12 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
             // Phase 52: bind(fd, port)
             FdEntry *fdt = (current_task_idx >= 0) ? task_slots[current_task_idx].fd_table : (FdEntry*)0;
             frame->rax = fdt ? (uint64_t)sys_bind(fdt, (int)frame->rbx, (uint16_t)frame->rcx) : (uint64_t)-1;
+        } else if (frame->rax == SYS_AUTH) {
+            // Phase 60: auth(user, pass) -> uid
+            frame->rax = (uint64_t)sys_auth(frame->rbx, frame->rcx);
+        } else if (frame->rax == SYS_MKDIR2) {
+            // Phase 60: mkdir(path)
+            frame->rax = (uint64_t)sys_mkdir2(frame->rbx);
         } else if (frame->rax == SYS_OPEN) {
             // Phase 41: open(path_ptr, flags) -> fd
             FdEntry *fdt = (current_task_idx >= 0) ? task_slots[current_task_idx].fd_table : (FdEntry*)0;
