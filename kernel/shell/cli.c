@@ -230,6 +230,35 @@ static int cli_cmd_nslookup(CliSession *session, const ParsedCommand *cmd) {
     return 0;
 }
 
+static int cli_cmd_slots(CliSession *session, const ParsedCommand *cmd) {
+    (void)session; (void)cmd;
+    extern int kernel_task_slot_info(int idx, uint32_t *pid, uint32_t *active,
+                                     uint32_t *ticks_rem, uint32_t *ticks_total);
+    extern int kernel_current_task_idx(void);
+    cli_printf("slot pid active rem total%s", "\n");
+    for (int i = 0; i < 16; i++) {
+        uint32_t pid, act, rem, tot;
+        if (kernel_task_slot_info(i, &pid, &act, &rem, &tot) < 0) break;
+        if (!act && pid == 0) continue;
+        cli_printf("%d    %u   %u      %u   %u\n", i, pid, act, rem, tot);
+    }
+    cli_printf("current: %d\n", kernel_current_task_idx());
+    return 0;
+}
+
+static int cli_cmd_perf(CliSession *session, const ParsedCommand *cmd) {
+    (void)session; (void)cmd;
+    extern uint32_t kernel_perf_get(int idx);
+    uint32_t ticks = kernel_perf_get(0);
+    cli_printf("uptime ticks:   %u\n", ticks);
+    cli_printf("ctx switches:   %u\n", kernel_perf_get(1));
+    cli_printf("syscalls:       %u\n", kernel_perf_get(2));
+    cli_printf("kbd irqs:       %u\n", kernel_perf_get(3));
+    cli_printf("mouse irqs:     %u\n", kernel_perf_get(4));
+    cli_printf("page faults:    %u\n", kernel_perf_get(5));
+    return 0;
+}
+
 static int cli_cmd_winmove(CliSession *session, const ParsedCommand *cmd) {
     (void)session;
     if (cmd->argc < 3) {
@@ -563,6 +592,8 @@ static const CliBuiltinCommand BUILTIN_COMMANDS[] = {
     { "udpclose", "Close UDP socket",         cli_cmd_udpclose, CLI_PRIV_USER  },
     { "dhcp",     "Configure IP via DHCP",    cli_cmd_dhcp,     CLI_PRIV_USER  },
     { "nslookup", "Resolve hostname (DNS)",   cli_cmd_nslookup, CLI_PRIV_USER  },
+    { "perf",     "Show kernel perf counters", cli_cmd_perf,    CLI_PRIV_USER  },
+    { "slots",    "Show C task slots (debug)", cli_cmd_slots,   CLI_PRIV_USER  },
 };
 
 // TCP status command implementation now inlined above

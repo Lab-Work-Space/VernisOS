@@ -223,6 +223,13 @@ USER_GETTY_X64_ELF = $(USER_OUT_DIR)/getty64.elf
 USER_LOGIN_X86_ELF = $(USER_OUT_DIR)/login32.elf
 USER_LOGIN_X64_ELF = $(USER_OUT_DIR)/login64.elf
 
+# Phase 53: init (PID 1)
+USER_INIT_SRC = $(USER_DIR)/init.c
+USER_INIT_X86_O = $(USER_OUT_DIR)/init_x86.o
+USER_INIT_X64_O = $(USER_OUT_DIR)/init_x64.o
+USER_INIT_X86_ELF = $(USER_OUT_DIR)/init32.elf
+USER_INIT_X64_ELF = $(USER_OUT_DIR)/init64.elf
+
 # ==== Toolchains ====
 CC_X86 = i686-elf-gcc
 CC_X64 = x86_64-elf-gcc
@@ -450,9 +457,9 @@ $(KERNEL_X64_ACPI): kernel/drivers/acpi.c include/acpi.h | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
 
 # ==== VernisFS image ====
-$(VFS_BIN): ai/tools/mkfs_vernis.py $(USER_VSH_X86_ELF) $(USER_VSH_X64_ELF) $(USER_GETTY_X64_ELF) $(USER_LOGIN_X64_ELF) | prepare
+$(VFS_BIN): ai/tools/mkfs_vernis.py $(USER_VSH_X86_ELF) $(USER_VSH_X64_ELF) $(USER_GETTY_X64_ELF) $(USER_LOGIN_X64_ELF) $(USER_INIT_X86_ELF) $(USER_INIT_X64_ELF) | prepare
 	@echo "Creating VernisFS image..."
-	python3 ai/tools/mkfs_vernis.py -o $(VFS_BIN) --vsh32 $(USER_VSH_X86_ELF) --vsh64 $(USER_VSH_X64_ELF) --getty $(USER_GETTY_X64_ELF) --login $(USER_LOGIN_X64_ELF)
+	python3 ai/tools/mkfs_vernis.py -o $(VFS_BIN) --vsh32 $(USER_VSH_X86_ELF) --vsh64 $(USER_VSH_X64_ELF) --getty $(USER_GETTY_X64_ELF) --login $(USER_LOGIN_X64_ELF) --init32 $(USER_INIT_X86_ELF) --init64 $(USER_INIT_X64_ELF)
 
 # ==== User-space programs (Phase 44/45) ====
 $(USER_CRT0_X86_O): $(USER_CRT0_X86) | prepare
@@ -504,6 +511,19 @@ $(USER_GETTY_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_GETTY_X64_O)
 
 $(USER_LOGIN_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_LOGIN_X64_O) $(USER_LD_X64) | prepare
 	$(LD_X64) -T $(USER_LD_X64) -m elf_x86_64 --gc-sections $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_LOGIN_X64_O) -o $@
+
+# ==== Phase 53: init (PID 1) ====
+$(USER_INIT_X86_O): $(USER_INIT_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
+	$(CC_X86) $(USER_CFLAGS_X86) -DSHELL_PATH='"/bin/vsh32"' -c $< -o $@
+
+$(USER_INIT_X64_O): $(USER_INIT_SRC) $(USER_SYSCALL_HDR) $(USER_LIBC_HDR) | prepare
+	$(CC_X64) $(USER_CFLAGS_X64) -DSHELL_PATH='"/bin/vsh64"' -c $< -o $@
+
+$(USER_INIT_X86_ELF): $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_INIT_X86_O) $(USER_LD_X86) | prepare
+	$(LD_X86) -T $(USER_LD_X86) -m elf_i386 --gc-sections $(USER_CRT0_X86_O) $(USER_LIBC_X86_O) $(USER_INIT_X86_O) -o $@
+
+$(USER_INIT_X64_ELF): $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_INIT_X64_O) $(USER_LD_X64) | prepare
+	$(LD_X64) -T $(USER_LD_X64) -m elf_x86_64 --gc-sections $(USER_CRT0_X64_O) $(USER_LIBC_X64_O) $(USER_INIT_X64_O) -o $@
 
 # ==== Compile policy_loader.c (x86) ====
 $(KERNEL_X86_POL): kernel/security/policy_loader.c include/ai_bridge.h | prepare

@@ -690,6 +690,13 @@ static void pic_send_eoi(uint8_t irq) {
 #define SYS_CHDIR     83
 #define SYS_GETCWD    84
 #define SYS_UMASK     85
+#define SYS_YIELD     86    // Phase 53: give up remaining time slice
+
+// Perf counters (STATUS item 23) — read via kernel_perf_get() for the CLI
+static uint64_t g_perf_syscalls;
+static uint64_t g_perf_irq_kbd;
+static uint64_t g_perf_irq_mouse;
+static uint64_t g_perf_pagefaults;
 
 #define USER_VADDR_MIN_64 0x10000000ULL
 #define USER_VADDR_MAX_64 0x40000000ULL
@@ -1880,6 +1887,7 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
 
     if (vec == 0x21) {
         // IRQ1: PS/2 Keyboard
+        g_perf_irq_kbd++;
         uint8_t scancode = inb(0x60);
         if (display_mode == 2) {
             gui_handle_key(scancode, (scancode & 0x80) ? 0 : 1);
@@ -1893,6 +1901,7 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
 
     if (vec == 0x2C) {
         // IRQ12: PS/2 Mouse
+        g_perf_irq_mouse++;
         mouse_irq_handler();
         pic_send_eoi(12);
         return 0;
@@ -1905,6 +1914,7 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
     }
 
     if (vec == 0x80) {
+        g_perf_syscalls++;
         // int 0x80 syscall: RAX=num, RBX=a1, RCX=a2, RDX=a3
         if (frame->rax == SYS_USER_TEST) {
             // Phase 17: heartbeat from Ring 3 user program
@@ -1961,6 +1971,11 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
             // Phase 20: getpid() — return current PID
             void *sched = get_kernel_scheduler();
             frame->rax = sched ? scheduler_get_current_pid(sched) : 0;
+        } else if (frame->rax == SYS_YIELD) {
+            // Phase 53: give up the rest of this time slice
+            if (current_task_idx >= 0)
+                task_slots[current_task_idx].ticks_remaining = 1;
+            frame->rax = 0;
         } else if (frame->rax == SYS_KILL) {
             // Phase 23: kill(pid, sig) — send signal to process
             uint64_t dst_pid = frame->rbx;
@@ -1969,6 +1984,20 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
             if (sched) {
                 extern int scheduler_signal_send(void *sched, size_t dst_pid, uint8_t sig);
                 frame->rax = (uint64_t)(int64_t)scheduler_signal_send(sched, dst_pid, sig);
+                // SIGKILL/SIGTERM actually terminate the target: free its
+                // task slot and mark it Terminated (exit code 137/143 style)
+                // so waitpid-based reapers (init) see the death. Only for
+                // other tasks — killing yourself is SYS_EXIT's job.
+                if (sig == 9 || sig == 15) {
+                    for (int ti = 0; ti < MAX_TASKS; ti++) {
+                        if (task_slots[ti].active && task_slots[ti].pid == dst_pid
+                            && ti != current_task_idx) {
+                            task_slots[ti].active = 0;
+                            scheduler_kill_process(sched, dst_pid);
+                            break;
+                        }
+                    }
+                }
             } else {
                 frame->rax = (uint64_t)-1;
             }
@@ -2099,6 +2128,7 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
         serial_print("\n");
 
         if (vec == 14) {
+            g_perf_pagefaults++;
             log_page_fault_detail(frame->error_code);
         } else if (vec == 13) {
             serial_print("[GP] general protection fault detected\n");
@@ -2516,6 +2546,27 @@ static void task_register_main(uint32_t pid, uint16_t ticks) {
     task_slots[0].cwd[0]          = '/';
     task_slots[0].cwd[1]          = '\0';
     current_task_idx = 0;
+}
+
+// Phase 53: kernel-side init/respawner. Watches the user shell; when its
+// scheduler state reports an exit code (SYS_EXIT or SIGKILL/SIGTERM), it
+// relaunches /bin/vsh64. elf_exec here runs in kernel-task context with
+// IRQs on — same conditions as the boot-time launch.
+static uint32_t g_shell_pid = 0;
+static void shell_respawner_entry(void) {
+    extern int32_t scheduler_get_exit_code(const void *sched, size_t pid);
+    for (;;) {
+        __asm__ volatile("hlt");
+        if (!g_shell_pid) continue;
+        void *sched = get_kernel_scheduler();
+        if (!sched) continue;
+        if (scheduler_get_exit_code(sched, g_shell_pid) >= 0) {
+            serial_print("[init] shell exited - respawning /bin/vsh64\n");
+            g_shell_pid = 0;
+            int slot = elf_exec("/bin/vsh64", 4);
+            if (slot >= 0) g_shell_pid = task_slots[slot].pid;
+        }
+    }
 }
 
 // Simple background worker — proves context switch works
@@ -4259,6 +4310,32 @@ void kernel_net_apply_config(uint32_t ip4, uint32_t gw4, uint32_t dns4) {
     if (dns4) dns_set_server(dns4);
 }
 
+// Debug: expose C task-slot state for the `slots` CLI command
+int kernel_task_slot_info(int idx, uint32_t *pid, uint32_t *active,
+                          uint32_t *ticks_rem, uint32_t *ticks_total) {
+    if (idx < 0 || idx >= MAX_TASKS) return -1;
+    if (pid) *pid = task_slots[idx].pid;
+    if (active) *active = task_slots[idx].active;
+    if (ticks_rem) *ticks_rem = task_slots[idx].ticks_remaining;
+    if (ticks_total) *ticks_total = task_slots[idx].ticks_total;
+    return 0;
+}
+int kernel_current_task_idx(void) { return current_task_idx; }
+
+// Perf counters for the `perf` CLI command:
+// 0=uptime ticks 1=ctx switches 2=syscalls 3=kbd irq 4=mouse irq 5=page faults
+uint32_t kernel_perf_get(int idx) {
+    switch (idx) {
+    case 0: return (uint32_t)kernel_tick;
+    case 1: return (uint32_t)context_switch_count;
+    case 2: return (uint32_t)g_perf_syscalls;
+    case 3: return (uint32_t)g_perf_irq_kbd;
+    case 4: return (uint32_t)g_perf_irq_mouse;
+    case 5: return (uint32_t)g_perf_pagefaults;
+    default: return 0;
+    }
+}
+
 // Exported for CLI
 int kernel_net_available(void) { return e1000_up; }
 void kernel_net_get_ip(uint8_t *out) { mcpy(out, net_ip, 4); }
@@ -4484,6 +4561,9 @@ void kernel_main(void) {
         // Small quantum: the worker only hlt-loops — a 24-tick (100ms) slice
         // starves the GUI compositor of wall time (round-robin, no blocking)
         int worker_idx = task_create(phase18_worker_entry, worker_pid, 1);
+        // Phase 53: kernel respawner (PID-1 semantics for the shell)
+        uint32_t respawn_pid = scheduler_create_process(kernel_scheduler, 9, "kinit");
+        task_create(shell_respawner_entry, respawn_pid, 1);
         if (worker_idx >= 0) {
             serial_print("[phase18] worker task created (pid=");
             serial_print_dec(worker_pid);
@@ -4496,13 +4576,18 @@ void kernel_main(void) {
     // ----- Phase 45: User shell boot -----
     g_elf_exec_fn = kernel_elf_exec;
     {
+        // Phase 53 note: a true user-space /sbin/init (fork+exec+respawn)
+        // is blocked on per-process address spaces — all user programs
+        // currently share one PML4, so a successful execve in a forked
+        // child overwrites the parent's code at 0x10000000. Until CR3
+        // switching lands, a kernel respawner task (below) provides the
+        // PID-1 semantics: watch the shell, relaunch it when it dies.
         const void *vsh = vfs_find_file("/bin/vsh64");
         if (vsh) {
-            serial_print("[phase45] found /bin/vsh64, launching user shell...\n");
-            // 4-tick quantum: vsh busy-polls stdin (no blocking reads yet);
-            // long slices just steal wall time from the GUI render loop
+            serial_print("[phase53] launching /bin/vsh64...\n");
             int elf_slot = elf_exec("/bin/vsh64", 4);
             if (elf_slot >= 0) {
+                g_shell_pid = task_slots[elf_slot].pid;
                 serial_print("[phase45] user shell task running\n");
             } else {
                 serial_print("[phase45] /bin/vsh64 load failed\n");

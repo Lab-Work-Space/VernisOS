@@ -289,6 +289,8 @@ def main():
     parser.add_argument("--vsh64", default="make/user/vsh64.elf", help="Optional x86_64 vsh ELF path")
     parser.add_argument("--vsh32", default="make/user/vsh32.elf", help="Optional i686 vsh ELF path")
     parser.add_argument("--getty", default=None, help="Optional x86_64 getty ELF path")
+    parser.add_argument("--init32", default=None, help="Optional x86 init ELF path (/sbin/init32)")
+    parser.add_argument("--init64", default=None, help="Optional x86_64 init ELF path (/sbin/init64)")
     parser.add_argument("--login", default=None, help="Optional x86_64 login ELF path")
     args = parser.parse_args()
 
@@ -369,6 +371,17 @@ def main():
             files.append(("/bin/vsh32", next_sector, len(vsh32_data), 1, 0x00))
             data_blocks.append(vsh32_data)
             next_sector += vsh32_sectors
+
+    # Phase 53: /sbin/init32 + /sbin/init64 (optional)
+    for arg_path, fs_name in ((args.init32, "/sbin/init32"), (args.init64, "/sbin/init64")):
+        if arg_path and os.path.exists(arg_path):
+            with open(arg_path, "rb") as f:
+                init_data = f.read()
+            if init_data:
+                init_sectors = (len(init_data) + 511) // 512
+                files.append((fs_name, next_sector, len(init_data), 1, 0x00))
+                data_blocks.append(init_data)
+                next_sector += init_sectors
 
     # Phase 60: /sbin/getty (optional)
     if args.getty and os.path.exists(args.getty):

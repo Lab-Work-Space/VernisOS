@@ -190,6 +190,7 @@ All intermediate files go under `make/` (not committed):
 |-----------|----------|--------|
 | TCP extras | `kernel/net/tcp.c` | Core works (handshake/data/close, checksum); no sliding window, data retransmit, OOO reassembly |
 | Socket fd model | — | UDP/TCP not exposed as file descriptors yet (Phase 52) |
+| Per-process address spaces | `kernel/arch/*/kernel_*.c` | All user tasks share one PML4/page-dir; successful execve in a forked child overwrites the parent at 0x10000000. Blocks userland /sbin/init (built but unused); kernel "kinit" respawner task provides respawn semantics instead |
 | FAT32 driver | `kernel/fs/fat32.c` | 3-line stub — ignore STATUS.md claim |
 | ext2 driver | `kernel/fs/ext2.c` | 3-line stub |
 | NTFS driver | `kernel/fs/ntfs.c` | 3-line stub |

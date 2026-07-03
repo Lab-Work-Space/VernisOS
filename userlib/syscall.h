@@ -27,6 +27,7 @@
 #define SYS_CHDIR     83
 #define SYS_GETCWD    84
 #define SYS_UMASK     85
+#define SYS_YIELD     86
 
 /* ---- Architecture-specific syscall inline ---- */
 
@@ -140,6 +141,10 @@ static inline int getcwd_sys(char *buf, size_t size) {
 
 static inline int umask_sys(int mask) {
     return (int)_syscall3(SYS_UMASK, (size_t)mask, 0, 0);
+}
+
+static inline int yield(void) {
+    return (int)_syscall3(SYS_YIELD, 0, 0, 0);
 }
 
 static inline void *sbrk(int increment) {

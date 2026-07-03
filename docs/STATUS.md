@@ -74,7 +74,7 @@
 | 21 | **ext2 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ext2.c เป็น stub 3 บรรทัด | กลาง |
 | 22 | **NTFS Filesystem** | ❌ ยังไม่ทำ — kernel/fs/ntfs.c เป็น stub 3 บรรทัด | กลาง |
 | 15 | **Framebuffer Graphics / GUI** | ✅ ทำงานแล้ว — auto-res double-buffered GUI, cursor-only fast path, dirty rect tracking; glassmorphism ทำให้ full compose ต่อ event (ดู Phase 61) | กลาง |
-| 23 | **Performance Optimization** | ❌ ยังไม่ทำ — ไม่พบ run queue bitmap ใน scheduler.rs และไม่มี `perf` CLI command | กลาง |
+| 23 | **Performance Optimization** | ⚠️ บางส่วน — perf counters (IRQ kbd/mouse, syscalls, page faults, ctx switches) + `perf` CLI + `slots` debug CLI ทำแล้ว (2026-07-03); O(1) run queue ยังไม่ทำ (round-robin 8 slots ไม่คุ้ม) | กลาง |
 | 16 | **ACPI / Power Management** | ✅ ทำงานแล้ว — เพิ่ม ACPI-lite driver (RSDP/RSDT/FADT/DSDT `_S5_`) สำหรับ `shutdown`/`restart` พร้อม reset-register และ QEMU fallback | กลาง |
 | 17 | **Pipes / Unix Sockets** | ✅ ทำงานแล้ว — shell pipeline `|` + local Unix-socket layer (`ipc_usock_*`) บน IPC channels พร้อม CLI (`usockbind/usocksend/usockrecv/usockclose`) | กลาง |
 | 18 | **`/dev` / `/proc` Pseudo-FS** | ✅ ทำงานแล้ว — เพิ่ม pseudo-files ใน `kfs_*` layer: `/proc/uptime`, `/proc/ps`, `/proc/fs`, `/dev/null`, `/dev/zero` พร้อม `ls`/`cat` ผ่าน CLI | ต่ำ |
@@ -492,12 +492,21 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ vernislibc wrappers: socket(), bind(), listen(), accept(), connect(), send(), recv()
       └─ /bin/nc (netcat) user-space tool
 
-    Phase 53: Init Process (PID 1) ⬜ PLANNED
-      └─ /sbin/init as first user process (forked by kernel)
-      └─ Parse /etc/inittab: respawn getty on tty0
-      └─ Reap zombie children (waitpid loop)
-      └─ Signal handling: SIGCHLD, SIGTERM for shutdown coordination
-      └─ Shutdown path: init sends SIGTERM to all → sync → power off
+    Phase 53: Init / Respawner ⚠️ PARTIAL (2026-07-03) — kernel-side init ทำงานแล้ว
+      └─ SYS_YIELD(86) + userlib yield(): สละ quantum ที่เหลือ
+      └─ SIGKILL/SIGTERM ฆ่า task จริงแล้ว: SYS_KILL deactivate slot +
+        scheduler_kill_process (exit code 137 — ไม่ใช่ -1 ที่ชนกับ "ยังไม่จบ")
+      └─ Kernel respawner task ("kinit"): เฝ้า shell ผ่าน scheduler exit code,
+        relaunch /bin/vsh ผ่าน elf_exec — ทดสอบ kill→respawn ซ้ำๆ ทั้ง x86+x64
+      └─ userlib/init.c (userland PID-1 จริง) เขียนเสร็จ + build เข้า image เป็น
+        /sbin/init{32,64} แล้ว แต่ยังเปิดใช้ไม่ได้:
+        └─ BLOCKER: ทุก user process แชร์ address space เดียว (kernel_pml4/page_dir)
+          — execve ที่สำเร็จใน child จะเขียนทับโค้ด parent ที่ 0x10000000 → parent พัง
+        └─ ต้องมี per-process page tables + CR3 switch ใน context switch ก่อน
+      └─ Bug ที่เจอระหว่างทำ (แก้แล้ว): x86 user stack + ELF segments map โดย
+        ไม่มี PAGE_WRITABLE → vsh32 page fault ตั้งแต่ push แรก — vsh32 ไม่เคย
+        รันได้เลยบน x86 จนวันนี้
+      └─ ยังไม่ทำ: inittab, SIGCHLD, shutdown coordination
 
     Phase 54: Interrupt-Driven I/O ⬜ PLANNED
       └─ AHCI: MSI/MSI-X or legacy IRQ interrupt handler

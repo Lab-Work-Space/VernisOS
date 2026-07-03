@@ -582,6 +582,13 @@ static volatile uint32_t kernel_tick = 0;
 #define SYS_CHDIR     83
 #define SYS_GETCWD    84
 #define SYS_UMASK     85
+#define SYS_YIELD     86    // Phase 53: give up remaining time slice
+
+// Perf counters (STATUS item 23) — read via kernel_perf_get() for the CLI
+static uint32_t g_perf_syscalls;
+static uint32_t g_perf_irq_kbd;
+static uint32_t g_perf_irq_mouse;
+static uint32_t g_perf_pagefaults;
 
 #define USER_VADDR_MIN_32 0x10000000U
 #define USER_VADDR_MAX_32 0x40000000U
@@ -1369,6 +1376,7 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
         terminal_writestring("[EXCEPTION] ");
 
         if (n == 14) {
+            g_perf_pagefaults++;
             log_page_fault_detail_32(frame->error_code);
         } else if (n == 13) {
             serial_print("[GP] general protection fault detected\n");
@@ -1516,6 +1524,7 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
         return 0;
     }
     if (n == 0x21) {   // IRQ1: keyboard
+        g_perf_irq_kbd++;
         if (display_mode == 2) {
             uint8_t sc = inb(0x60);
             gui_handle_key(sc, (sc & 0x80) ? 0 : 1);
@@ -1527,6 +1536,7 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
         return 0;
     }
     if (n == 0x2C) {   // IRQ12: PS/2 Mouse
+        g_perf_irq_mouse++;
         mouse_irq_handler();
         outb(0xA0, 0x20);
         outb(0x20, 0x20);
@@ -1538,6 +1548,7 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
         return 0;
     }
     if (n == 0x80) {   // INT 0x80 syscall
+        g_perf_syscalls++;
         uint32_t num = frame->eax;
         uint32_t a1  = frame->ebx;
         uint32_t a2  = frame->ecx;
@@ -1594,6 +1605,11 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
             // Phase 20: getpid() — return current PID
             void *sched = get_kernel_scheduler();
             ret = sched ? (int32_t)scheduler_get_current_pid(sched) : 0;
+        } else if (num == SYS_YIELD) {
+            // Phase 53: give up the rest of this time slice
+            if (current_task_idx >= 0)
+                task_slots[current_task_idx].ticks_remaining = 1;
+            ret = 0;
         } else if (num == SYS_KILL) {
             // Phase 23: kill(pid, sig) — send signal to process
             uint32_t dst_pid = (uint32_t)a1;
@@ -1602,6 +1618,18 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
             if (sched) {
                 extern int scheduler_signal_send(void *sched, uint32_t dst_pid, uint8_t sig);
                 ret = scheduler_signal_send(sched, dst_pid, sig);
+                // SIGKILL/SIGTERM actually terminate the target (see x64)
+                if (sig == 9 || sig == 15) {
+                    extern int scheduler_kill_process(void *sched, uint32_t pid);
+                    for (int ti = 0; ti < MAX_TASKS; ti++) {
+                        if (task_slots[ti].active && task_slots[ti].pid == dst_pid
+                            && ti != current_task_idx) {
+                            task_slots[ti].active = 0;
+                            scheduler_kill_process(sched, dst_pid);
+                            break;
+                        }
+                    }
+                }
             } else {
                 ret = -1;
             }
@@ -1940,6 +1968,24 @@ static void task_register_main_32(uint32_t pid, uint16_t ticks) {
     current_task_idx = 0;
 }
 
+// Phase 53: kernel-side init/respawner (see x64 for rationale)
+static uint32_t g_shell_pid = 0;
+static int elf_exec_32(const char *path, uint16_t quantum);
+static void shell_respawner_entry_32(void) {
+    for (;;) {
+        __asm__ volatile("hlt");
+        if (!g_shell_pid) continue;
+        void *sched = get_kernel_scheduler();
+        if (!sched) continue;
+        if (scheduler_get_exit_code(sched, g_shell_pid) >= 0) {
+            serial_print("[init] shell exited - respawning /bin/vsh32\n");
+            g_shell_pid = 0;
+            int slot = elf_exec_32("/bin/vsh32", 4);
+            if (slot >= 0) g_shell_pid = task_slots[slot].pid;
+        }
+    }
+}
+
 static void phase18_worker_entry_32(void) {
     volatile uint32_t local_tick = 0;
     while (1) {
@@ -2094,7 +2140,9 @@ static int elf_exec_32(const char *path, uint16_t ticks) {
                 }
             }
 
-            paging_map_4k_32(kernel_page_dir, va, frame, PAGE_USER_32);
+            // PAGE_WRITABLE_32 is required: .data/.bss live in these pages
+            paging_map_4k_32(kernel_page_dir, va, frame,
+                             PAGE_USER_32 | PAGE_WRITABLE_32);
         }
     }
 
@@ -2106,8 +2154,10 @@ static int elf_exec_32(const char *path, uint16_t ticks) {
             task_slots[slot].active = 0;
             return -1;
         }
+        // Writable, obviously — the missing PAGE_WRITABLE_32 here made the
+        // very first user push fault (err=0x7) and killed vsh32 on boot
         paging_map_4k_32(kernel_page_dir, USER_STACK_TOP_32 - USER_STACK_SIZE_32 + i,
-                         frame, PAGE_USER_32);
+                         frame, PAGE_USER_32 | PAGE_WRITABLE_32);
     }
     __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax", "memory");
 
@@ -3836,6 +3886,32 @@ void kernel_net_apply_config(uint32_t ip4, uint32_t gw4, uint32_t dns4) {
 // TCP's clock source (x64 defines this next to kernel_tick; x86 was missing it)
 uint32_t get_kernel_tick(void) { return kernel_tick; }
 
+// Debug: expose C task-slot state for the `slots` CLI command
+int kernel_task_slot_info(int idx, uint32_t *pid, uint32_t *active,
+                          uint32_t *ticks_rem, uint32_t *ticks_total) {
+    if (idx < 0 || idx >= MAX_TASKS) return -1;
+    if (pid) *pid = task_slots[idx].pid;
+    if (active) *active = task_slots[idx].active;
+    if (ticks_rem) *ticks_rem = task_slots[idx].ticks_remaining;
+    if (ticks_total) *ticks_total = task_slots[idx].ticks_total;
+    return 0;
+}
+int kernel_current_task_idx(void) { return current_task_idx; }
+
+// Perf counters for the `perf` CLI command:
+// 0=uptime ticks 1=ctx switches 2=syscalls 3=kbd irq 4=mouse irq 5=page faults
+uint32_t kernel_perf_get(int idx) {
+    switch (idx) {
+    case 0: return (uint32_t)kernel_tick;
+    case 1: return (uint32_t)context_switch_count;
+    case 2: return g_perf_syscalls;
+    case 3: return g_perf_irq_kbd;
+    case 4: return g_perf_irq_mouse;
+    case 5: return g_perf_pagefaults;
+    default: return 0;
+    }
+}
+
 int kernel_net_available(void) { return e1000_up; }
 void kernel_net_get_ip(uint8_t *out) { mcpy(out, net_ip, 4); }
 void kernel_net_get_mac(uint8_t *out) { mcpy(out, e1000_mac, 6); }
@@ -4050,6 +4126,9 @@ void kernel_main(void) {
         // Small quantum: the worker only hlt-loops — a 24-tick (100ms) slice
         // starves the GUI compositor of wall time (round-robin, no blocking)
         int worker_idx = task_create_32(phase18_worker_entry_32, worker_pid, 1);
+        // Phase 53: kernel respawner (PID-1 semantics for the shell)
+        uint32_t respawn_pid = scheduler_create_process(kernel_scheduler, 9, "kinit");
+        task_create_32(shell_respawner_entry_32, respawn_pid, 1);
         if (worker_idx >= 0) {
             serial_print("[phase18] worker task created (pid=");
             serial_print_dec(worker_pid);
@@ -4062,13 +4141,16 @@ void kernel_main(void) {
     // ----- Phase 45: User shell boot -----
     g_elf_exec_fn = kernel_elf_exec_32;
     {
+        // Phase 53: userland init blocked on per-process address spaces
+        // (see x64) — kernel respawner task provides PID-1 semantics.
         const void *vsh = vfs_find_file("/bin/vsh32");
         if (vsh) {
-            serial_print("[phase45] found /bin/vsh32, launching user shell...\n");
+            serial_print("[phase53] launching /bin/vsh32...\n");
             // 4-tick quantum: vsh busy-polls stdin (no blocking reads yet);
             // long slices just steal wall time from the GUI render loop
             int elf_slot = elf_exec_32("/bin/vsh32", 4);
             if (elf_slot >= 0) {
+                g_shell_pid = task_slots[elf_slot].pid;
                 serial_print("[phase45] user shell task running\n");
             } else {
                 serial_print("[phase45] /bin/vsh32 load failed\n");

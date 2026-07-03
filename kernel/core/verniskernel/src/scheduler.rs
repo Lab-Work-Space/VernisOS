@@ -415,7 +415,9 @@ impl Scheduler {
     pub fn kill_process(&mut self, pid: usize) -> bool {
         if let Some(proc) = self.processes.get_mut(&pid) {
             proc.state = ProcessState::Terminated;
-            proc.exit_code = Some(-1); // Killed
+            // 128 + SIGKILL, NOT -1: waitpid uses -1 for "still running",
+            // so a killed child must report a non-negative code
+            proc.exit_code = Some(137);
             return true;
         }
         false
