@@ -51,6 +51,14 @@ pub struct WindowManager {
     pub drag_offset_y: i32,
     pub bpp: u32,
     pub wins_dirty: bool,   // Set when window layout/visibility changes
+    // Damage accumulator: union of screen rects invalidated by layout
+    // changes since the last compose (dmg_w == 0 means empty). Lets the
+    // compose restore/present only what changed instead of the whole frame.
+    pub dmg_x: i32,
+    pub dmg_y: i32,
+    pub dmg_w: u32,
+    pub dmg_h: u32,
+    pub taskbar_dirty: bool, // taskbar buttons changed (create/close/focus)
 }
 
 static mut WM: WindowManager = WindowManager {
@@ -62,7 +70,60 @@ static mut WM: WindowManager = WindowManager {
     drag_offset_y: 0,
     bpp: 24,
     wins_dirty: true,  // Initially dirty (need full redraw)
+    dmg_x: 0,
+    dmg_y: 0,
+    dmg_w: 0,
+    dmg_h: 0,
+    taskbar_dirty: true,
 };
+
+/// Union a screen rect into the damage accumulator.
+unsafe fn damage_add(x: i32, y: i32, w: u32, h: u32) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    if WM.dmg_w == 0 || WM.dmg_h == 0 {
+        WM.dmg_x = x;
+        WM.dmg_y = y;
+        WM.dmg_w = w;
+        WM.dmg_h = h;
+        return;
+    }
+    let x0 = WM.dmg_x.min(x);
+    let y0 = WM.dmg_y.min(y);
+    let x1 = (WM.dmg_x.saturating_add(WM.dmg_w as i32)).max(x.saturating_add(w as i32));
+    let y1 = (WM.dmg_y.saturating_add(WM.dmg_h as i32)).max(y.saturating_add(h as i32));
+    WM.dmg_x = x0;
+    WM.dmg_y = y0;
+    WM.dmg_w = (x1 - x0) as u32;
+    WM.dmg_h = (y1 - y0) as u32;
+}
+
+/// Take and clear the accumulated damage rect (None if nothing recorded).
+pub unsafe fn wm_take_damage() -> Option<(i32, i32, u32, u32)> {
+    if WM.dmg_w == 0 || WM.dmg_h == 0 {
+        return None;
+    }
+    let r = (WM.dmg_x, WM.dmg_y, WM.dmg_w, WM.dmg_h);
+    WM.dmg_w = 0;
+    WM.dmg_h = 0;
+    Some(r)
+}
+
+/// Take and clear the taskbar-dirty flag.
+pub unsafe fn wm_take_taskbar_dirty() -> bool {
+    let d = WM.taskbar_dirty;
+    WM.taskbar_dirty = false;
+    d
+}
+
+#[inline(always)]
+fn rects_intersect(ax: i32, ay: i32, aw: u32, ah: u32, bx: i32, by: i32, bw: u32, bh: u32) -> bool {
+    ax < bx.saturating_add(bw as i32)
+        && bx < ax.saturating_add(aw as i32)
+        && ay < by.saturating_add(bh as i32)
+        && by < ay.saturating_add(ah as i32)
+}
 
 pub unsafe fn wm_get() -> &'static mut WindowManager {
     &mut WM
@@ -74,6 +135,9 @@ pub unsafe fn wm_init(bpp: u32) {
     WM.next_id = 1;
     WM.dragging = None;
     WM.bpp = bpp;
+    WM.dmg_w = 0;
+    WM.dmg_h = 0;
+    WM.taskbar_dirty = true;
 }
 
 pub unsafe fn wm_create_window(title: &[u8], x: i32, y: i32, w: u32, h: u32) -> u32 {
@@ -118,11 +182,17 @@ pub unsafe fn wm_create_window(title: &[u8], x: i32, y: i32, w: u32, h: u32) -> 
 
     WM.windows.push(win);
     WM.z_order.push(id);
+    damage_add(x, y, w, h);
+    WM.taskbar_dirty = true;
+    WM.wins_dirty = true;
 
     id
 }
 
 pub unsafe fn wm_close_window(id: u32) {
+    if let Some(w) = WM.windows.iter().find(|w| w.id == id) {
+        damage_add(w.x, w.y, w.width, w.height);
+    }
     WM.z_order.retain(|&wid| wid != id);
     WM.windows.retain(|w| w.id != id);
     if let Some(&top_id) = WM.z_order.last() {
@@ -130,6 +200,7 @@ pub unsafe fn wm_close_window(id: u32) {
             w.focused = true;
         }
     }
+    WM.taskbar_dirty = true;
     WM.wins_dirty = true;  // Window list changed
 }
 
@@ -139,7 +210,12 @@ pub unsafe fn wm_focus_window(id: u32) {
     WM.z_order.push(id);
     for w in WM.windows.iter_mut() {
         w.focused = w.id == id;
+        // Focus alpha (title strip + edges) changes on every window
+        if w.visible {
+            damage_add(w.x, w.y, w.width, w.height);
+        }
     }
+    WM.taskbar_dirty = true;
     WM.wins_dirty = true;  // Z-order and focus changed
 }
 
@@ -153,8 +229,12 @@ fn find_window(wm: &mut WindowManager, id: u32) -> Option<&mut Window> {
 
 pub unsafe fn wm_move_window(id: u32, x: i32, y: i32) {
     if let Some(w) = find_window(&mut WM, id) {
+        let (ox, oy, ow, oh) = (w.x, w.y, w.width, w.height);
         w.x = x;
         w.y = y;
+        let (nw, nh) = (w.width, w.height);
+        damage_add(ox, oy, ow, oh);   // old position
+        damage_add(x, y, nw, nh);     // new position
         WM.wins_dirty = true;  // Layout changed
     }
 }
@@ -478,6 +558,75 @@ pub unsafe fn wm_compose_all(do_blur: bool) {
     }
 }
 
+/// Partial layout compose: restore the wallpaper under the damage rect and
+/// recompose only the windows that intersect it. Any recomposed window is
+/// re-frosted over its FULL rect, so the damage is first expanded (to a
+/// fixpoint) to cover every intersecting window — re-blurring pixels whose
+/// backdrop wasn't restored would compound the blur.
+/// Returns false if the wallpaper cache isn't populated (caller falls back
+/// to a full compose, which also paints + captures the wallpaper).
+pub unsafe fn wm_compose_partial(
+    dmg_x: i32,
+    dmg_y: i32,
+    dmg_w: u32,
+    dmg_h: u32,
+    do_blur: bool,
+) -> bool {
+    let comp = compositor::compositor_get();
+    if !comp.initialized {
+        return false;
+    }
+    let (mut dx, mut dy, mut dw, mut dh) = (dmg_x, dmg_y, dmg_w, dmg_h);
+
+    // Expand damage until it covers all windows it touches (window count is
+    // tiny; a fixpoint loop is fine)
+    loop {
+        let mut grew = false;
+        for w in WM.windows.iter() {
+            if !w.visible {
+                continue;
+            }
+            if rects_intersect(dx, dy, dw, dh, w.x, w.y, w.width, w.height) {
+                let x0 = dx.min(w.x);
+                let y0 = dy.min(w.y);
+                let x1 = (dx.saturating_add(dw as i32)).max(w.x.saturating_add(w.width as i32));
+                let y1 = (dy.saturating_add(dh as i32)).max(w.y.saturating_add(w.height as i32));
+                let (nw, nh) = ((x1 - x0) as u32, (y1 - y0) as u32);
+                if x0 != dx || y0 != dy || nw != dw || nh != dh {
+                    dx = x0; dy = y0; dw = nw; dh = nh;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    if !compositor::compositor_wallpaper_restore_rect(dx, dy, dw, dh) {
+        return false;
+    }
+
+    // Recompose intersecting windows in z-order
+    let z_len = WM.z_order.len();
+    for zi in 0..z_len {
+        let wid = WM.z_order[zi];
+        if let Some(w) = WM.windows.iter().find(|w| w.id == wid) {
+            if w.visible && rects_intersect(dx, dy, dw, dh, w.x, w.y, w.width, w.height) {
+                compose_window_glass(w, do_blur);
+            }
+        }
+    }
+    true
+}
+
+/// Does a rect touch the taskbar strip at the bottom of the screen?
+pub unsafe fn wm_rect_hits_taskbar(y: i32, h: u32, taskbar_h: u32) -> bool {
+    let comp = compositor::compositor_get();
+    let bar_y = comp.height.saturating_sub(taskbar_h) as i32;
+    y.saturating_add(h as i32) > bar_y
+}
+
 /// Recompose a single window's glass. Partial-compose fast path: the caller
 /// must have restored the wallpaper under the window rect first.
 pub unsafe fn wm_compose_by_id(id: u32) -> bool {
@@ -579,6 +728,18 @@ pub unsafe fn wm_stop_drag() {
 
 pub unsafe fn wm_is_dragging() -> bool {
     WM.dragging.is_some()
+}
+
+/// C FFI: move the focused window by a delta. Drives the same damage-based
+/// layout compose as a mouse drag — used by the `winmove` CLI command
+/// (and by tests, where synthetic PS/2 drags are unreliable).
+#[no_mangle]
+pub unsafe extern "C" fn gui_move_focused_window(dx: i32, dy: i32) -> i32 {
+    let Some(&id) = WM.z_order.last() else { return -1; };
+    let Some(w) = WM.windows.iter().find(|w| w.id == id) else { return -1; };
+    let (nx, ny) = (w.x + dx, w.y + dy);
+    wm_move_window(id, nx, ny);
+    0
 }
 
 /// Check if any window layout changed (position, visibility, z-order, etc.)

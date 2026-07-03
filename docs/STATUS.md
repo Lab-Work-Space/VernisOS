@@ -595,6 +595,23 @@ Phase 28: Shell Pipeline Support ✅ DONE
         └─ Telemetry: "[gui] slow compose: ticks=N" เมื่อ compose+present > 8 ticks (~33ms)
         └─ ผลวัด: typing ไม่มี slow-compose warning (จากเดิม ~150 ticks/คีย์),
           drag frame ~45-70 ticks (เดิม 144-487), boot compose 203 (เดิม 445)
+      └─ Perf pass 2 (2026-07-03) — union-rect present + fast memcpy:
+        └─ Damage tracking ใน window manager: move/focus/close/create สะสม rect;
+          layout compose restore wallpaper + recompose เฉพาะหน้าต่างที่โดน damage
+          (ขยาย damage แบบ fixpoint กันการ blur ซ้อน), taskbar วาดเฉพาะเมื่อจำเป็น,
+          present เฉพาะ union rect — ไม่ก็อป full frame 8MB ต่อ event อีกแล้ว
+        └─ พบ bottleneck ระดับระบบ: rust_shims memcpy/memset เป็น byte loop
+          (~20MB/s ใต้ TCG) — ทุก restore/present ติดคอขวดนี้ → เปลี่ยนเป็น
+          rep movsq/stosq (movsl บน i686); TCG emulate ทีละ iteration ดังนั้น
+          word-size = 8x/4x iteration น้อยลง
+        └─ เพิ่ม CLI `winmove <dx> <dy>` (ขยับหน้าต่าง focused) — ใช้ทดสอบ damage path
+          แบบ deterministic เพราะ inject PS/2 drag ผ่าน QEMU monitor ไม่เสถียร
+        └─ Telemetry เพิ่ม path tag: path=1 layout-partial, 2 full, 3 typing-glass
+        └─ ผลวัด (x64@1080p): typing 11-14 ticks (เดิม ~56), winmove layout compose
+          ~29 ticks, boot compose 42 (เดิม 199); x86: typing 13-16
+        └─ Known: PS/2 stream อาจ desync กับ synthetic input (บาง packet หาย) —
+          mouse จริงใช้งานได้; 9-bit sign bits (flags bit 4/5) ยังไม่ handle ใน
+          mouse_irq_handler (delta >127 จะเพี้ยน)
 
     Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — audit 2026-07-02: มี userlib/getty.c + login.c + Makefile rules + mkfs support จริง แต่ syscalls SETUID/GETUID/CHDIR/GETCWD/UMASK (79–85) ไม่มีใน kernel (syscall สูงสุดคือ SYS_SYNC=78)
       └─ /sbin/getty: display login prompt, fork + exec /bin/login

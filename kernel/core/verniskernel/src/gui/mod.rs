@@ -24,6 +24,7 @@ static mut LAST_FRAME_TICK: u32 = 0;
 static mut LAST_CURSOR_X: i32 = -1;  // Cache cursor position to skip redundant renders
 static mut LAST_CURSOR_Y: i32 = -1;
 static mut LAST_FULL_COMPOSE_TICK: u32 = 0;  // drag-throttle for full composes
+static mut LAST_COMPOSE_PATH: u8 = 0;        // telemetry: which branch composed
 
 const GUI_MAX_EVENTS_PER_TICK: usize = 64;
 
@@ -177,14 +178,59 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
         }
         // While dragging: tint-only glass (no blur) keeps frames cheap
         // under TCG; the drop composes once more with full frost.
-        desktop::desktop_draw_background();
-        window::wm_compose_all(!dragging);
-        desktop::desktop_draw_taskbar();
+        let do_blur = !dragging;
+        let taskbar_dirty = window::wm_take_taskbar_dirty();
+        let damage = window::wm_take_damage();
+
+        match damage {
+            Some((dx0, dy0, dw0, dh0)) => {
+                // Union in the previous and current cursor rects: the old
+                // cursor pixels are baked into the back buffer and must be
+                // restored if they sit outside the window damage.
+                let (mut dx, mut dy, mut dw, mut dh) = (dx0, dy0, dw0, dh0);
+                for (cx, cy) in [(LAST_CURSOR_X, LAST_CURSOR_Y),
+                                 (mouse::mouse_get_x(), mouse::mouse_get_y())] {
+                    if cx >= 0 && cy >= 0 {
+                        let x1 = (dx.saturating_add(dw as i32)).max(cx + 16);
+                        let y1 = (dy.saturating_add(dh as i32)).max(cy + 24);
+                        dx = dx.min(cx);
+                        dy = dy.min(cy);
+                        dw = (x1 - dx) as u32;
+                        dh = (y1 - dy) as u32;
+                    }
+                }
+                if window::wm_compose_partial(dx, dy, dw, dh, do_blur) {
+                    LAST_COMPOSE_PATH = 1; // layout-partial
+                    // Taskbar only if its buttons changed or damage reaches it
+                    if taskbar_dirty
+                        || window::wm_rect_hits_taskbar(dy, dh, desktop::taskbar_height())
+                    {
+                        desktop::desktop_draw_taskbar();
+                    }
+                } else {
+                    LAST_COMPOSE_PATH = 2; // layout-full fallback
+                    // Wallpaper cache not populated yet — full compose paints
+                    // and captures it
+                    desktop::desktop_draw_background();
+                    window::wm_compose_all(do_blur);
+                    desktop::desktop_draw_taskbar();
+                }
+            }
+            None => {
+                if taskbar_dirty {
+                    desktop::desktop_draw_taskbar();
+                }
+                // No damage recorded (e.g. click on empty desktop): nothing
+                // else to recompose — fall through to cursor + present
+            }
+        }
         window::wm_windows_rendered();
         LAST_FULL_COMPOSE_TICK = current_tick;
     } else if had_key || term_was_dirty {
-        if !partial_compose_single_window() {
-            // Fallback (multiple windows / taskbar overlap): full compose
+        if partial_compose_single_window() {
+            LAST_COMPOSE_PATH = 3; // typing partial
+        } else {
+            LAST_COMPOSE_PATH = 4; // typing full fallback
             desktop::desktop_draw_background();
             window::wm_compose_all(true);
             desktop::desktop_draw_taskbar();
@@ -211,6 +257,8 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
     if spent > 8 {
         serial_print(b"[gui] slow compose: ticks=\0".as_ptr());
         serial_print_dec(spent);
+        serial_print(b" path=\0".as_ptr());
+        serial_print_dec(LAST_COMPOSE_PATH as u32);
         serial_print(b"\n\0".as_ptr());
     }
 }

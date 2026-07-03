@@ -112,6 +112,30 @@ static int cli_cmd_tcprecv(CliSession *session, const ParsedCommand *cmd) {
     return 0;
 }
 
+static int cli_cmd_winmove(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 3) {
+        cli_printf("Usage: winmove <dx> <dy>\n");
+        return 1;
+    }
+    // parse signed ints (simple_atoi has no minus handling)
+    int vals[2];
+    for (int i = 0; i < 2; i++) {
+        const char *s = cmd->argv[1 + i];
+        int neg = (*s == '-');
+        if (neg) s++;
+        int v = simple_atoi(s);
+        vals[i] = neg ? -v : v;
+    }
+    extern int gui_move_focused_window(int dx, int dy);
+    if (gui_move_focused_window(vals[0], vals[1]) < 0) {
+        cli_printf("winmove: no window (GUI mode only)\n");
+        return 1;
+    }
+    cli_printf("moved by %d,%d\n", vals[0], vals[1]);
+    return 0;
+}
+
 static int cli_cmd_tcpclose(CliSession *session, const ParsedCommand *cmd) {
     (void)session;
     if (cmd->argc < 2) {
@@ -414,6 +438,7 @@ static const CliBuiltinCommand BUILTIN_COMMANDS[] = {
     { "tcpsend",  "Send data on TCP socket",  cli_cmd_tcpsend,  CLI_PRIV_USER  },
     { "tcprecv",  "Read data from TCP socket", cli_cmd_tcprecv, CLI_PRIV_USER  },
     { "tcpclose", "Close TCP socket",         cli_cmd_tcpclose, CLI_PRIV_USER  },
+    { "winmove",  "Move focused window (GUI)", cli_cmd_winmove, CLI_PRIV_USER  },
 };
 
 // TCP status command implementation now inlined above
