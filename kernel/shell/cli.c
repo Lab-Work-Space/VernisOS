@@ -998,11 +998,12 @@ static int cli_cmd_help(CliSession *session, const ParsedCommand *cmd) {
     cli_printf("Built-in commands:\n\n");
     
     for (size_t i = 0; i < BUILTIN_COMMANDS_COUNT; i++) {
-        cli_printf("  %-10s - %s\n", 
+        cli_printf("  %-10s - %s\n",
                    BUILTIN_COMMANDS[i].name,
                    BUILTIN_COMMANDS[i].description);
     }
-    cli_printf("\n");
+    cli_printf("\nOperators: cmd1 | cmd2 (pipe)  cmd1 ; cmd2 (run both)\n");
+    cli_printf("           cmd1 && cmd2 (if ok)  cmd1 || cmd2 (if failed)\n\n");
     return CLI_OK;
 }
 
@@ -1879,6 +1880,23 @@ int cli_execute_command(CliSession *session, const ParsedCommand *cmd, uint32_t 
 // Line Processing
 // =============================================================================
 
+// Run a single command segment (no ;/&&/|| — those are split off first).
+// Pipes (|) and redirects still work here via cli_parse_command.
+static int cli_process_single(CliSession *session, const char *seg) {
+    ParsedCommand cmd;
+    int parse_result = cli_parse_command(seg, &cmd);
+    if (parse_result != CLI_OK) {
+        cli_printf("Syntax error\n");
+        return parse_result;
+    }
+    uint32_t pid = 0;
+    return cli_execute_command(session, &cmd, &pid);
+}
+
+// Command grouping separators (bash-like, left-associative).
+#define CLI_MAX_SEGMENTS 16
+typedef enum { SEP_NONE = 0, SEP_SEQ, SEP_AND, SEP_OR } CliSep;
+
 int cli_process_line(CliShell *shell, CliSession *session, const char *line) {
     if (!shell || !session || !line) return CLI_ERR_SYNTAX;
 
@@ -1893,17 +1911,63 @@ int cli_process_line(CliShell *shell, CliSession *session, const char *line) {
         }
     }
 
-    // Parse command
-    ParsedCommand cmd;
-    int parse_result = cli_parse_command(line, &cmd);
-    if (parse_result != CLI_OK) {
-        cli_printf("Syntax error\n");
-        return parse_result;
+    // Split the line on ;  &&  ||  — respecting " quotes and NOT touching a
+    // single | (that's a pipe, handled inside cli_parse_command).
+    // Zero first: cli_strcpy only terminates at [max-1], so without this the
+    // bytes after the copied line are stack garbage — the splitter would
+    // scan into them and the last token would read past its end.
+    char work[CLI_MAX_INPUT_LEN];
+    cli_memset(work, 0, sizeof(work));
+    cli_strcpy(work, line, sizeof(work));
+
+    const char *segs[CLI_MAX_SEGMENTS];
+    CliSep      pre[CLI_MAX_SEGMENTS];   // separator PRECEDING seg[i]
+    int         nseg = 0;
+    segs[nseg] = work;
+    pre[nseg]  = SEP_NONE;
+    nseg++;
+
+    int in_quote = 0;
+    for (char *p = work; *p; p++) {
+        if (*p == '"') { in_quote = !in_quote; continue; }
+        if (in_quote) continue;
+
+        CliSep sep = SEP_NONE;
+        int adv = 0;
+        if (*p == ';')                    { sep = SEP_SEQ; adv = 1; }
+        else if (*p == '&' && p[1] == '&') { sep = SEP_AND; adv = 2; }
+        else if (*p == '|' && p[1] == '|') { sep = SEP_OR;  adv = 2; }
+
+        if (sep != SEP_NONE && nseg < CLI_MAX_SEGMENTS) {
+            *p = '\0';
+            if (adv == 2) p[1] = '\0';
+            segs[nseg] = p + adv;
+            pre[nseg]  = sep;
+            nseg++;
+            p += adv - 1;   // -1 offsets the loop's p++
+        } else if (sep != SEP_NONE) {
+            // Too many segments — stop splitting, run the rest as one.
+            break;
+        }
     }
 
-    // Execute
-    uint32_t pid = 0;
-    return cli_execute_command(session, &cmd, &pid);
+    // Execute left-to-right with short-circuit:
+    //   &&  runs next only if previous succeeded (status == 0)
+    //   ||  runs next only if previous failed   (status != 0)
+    //   ;   always runs next
+    int status = CLI_OK;
+    for (int i = 0; i < nseg; i++) {
+        const char *seg = segs[i];
+        while (*seg == ' ' || *seg == '\t') seg++;
+        if (!*seg) continue;   // empty segment (e.g. trailing ';')
+
+        if (i > 0) {
+            if (pre[i] == SEP_AND && status != CLI_OK) continue;
+            if (pre[i] == SEP_OR  && status == CLI_OK) continue;
+        }
+        status = cli_process_single(session, seg);
+    }
+    return status;
 }
 
 // =============================================================================

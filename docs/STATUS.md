@@ -675,6 +675,16 @@ Phase 28: Shell Pipeline Support ✅ DONE
 
 ---
 
+    Phase 63: Shell Command Grouping ✅ DONE (2026-07-03)
+      └─ CLI split บรรทัดด้วย ; && || ก่อน parse (respect " quotes, ไม่แตะ | pipe)
+      └─ Short-circuit: && รันต่อเมื่อก่อนหน้าสำเร็จ (status==0), || เมื่อล้มเหลว,
+        ; รันเสมอ — left-to-right เหมือน bash
+      └─ สูงสุด 16 segment/บรรทัด; pipe (|) + redirect ยังทำงานภายในแต่ละ segment
+      └─ แก้ bug ที่เจอ: work buffer ไม่ได้ zero → cli_strcpy terminate แค่ [max-1]
+        → splitter scan เข้า stack garbage, token สุดท้ายอ่านเลย buffer (echo พ่น
+        garbage bytes) — memset work ก่อน copy
+      └─ Verified 9/9 ทั้ง x86+x64: ; && || short-circuit + pipe ผสม, ไม่มี garbage
+
 ## ภาพรวมสถาปัตยกรรม
 
 ```
