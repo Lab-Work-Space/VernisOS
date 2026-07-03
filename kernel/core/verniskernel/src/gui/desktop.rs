@@ -47,6 +47,9 @@ unsafe fn draw_blob(cx: i32, cy: i32, radius: i32, color: u32, max_alpha: u32) {
     let y1 = (cy + radius).min(comp.height as i32);
     let x0 = (cx - radius).max(0);
     let x1 = (cx + radius).min(comp.width as i32);
+    // Reciprocal multiply instead of a per-pixel division (painted once,
+    // but a 2M-pixel divide loop still stalls boot under TCG)
+    let recip = (max_alpha << 15) / r2;
     for py in y0..y1 {
         let dy = py - cy;
         let row_base = buf.add(py as usize * pitch);
@@ -57,7 +60,7 @@ unsafe fn draw_blob(cx: i32, cy: i32, radius: i32, color: u32, max_alpha: u32) {
                 continue;
             }
             // alpha falls off quadratically towards the rim
-            let a = max_alpha * (r2 - d2) / r2;
+            let a = ((r2 - d2) * recip) >> 15;
             if a == 0 {
                 continue;
             }
@@ -69,6 +72,13 @@ unsafe fn draw_blob(cx: i32, cy: i32, radius: i32, color: u32, max_alpha: u32) {
 }
 
 pub unsafe fn desktop_draw_background() {
+    // Fast path: backdrop is static, so after the first paint every compose
+    // restores it from the wallpaper cache with one memcpy.
+    if compositor::compositor_wallpaper_restore_full() {
+        return;
+    }
+    extern "C" { fn serial_print(s: *const u8); }
+    serial_print(b"[gui] wallpaper repaint\n\0".as_ptr());
     let h = SCREEN_H.max(1);
     // Vertical gradient, one fill per row
     for row in 0..SCREEN_H {
@@ -83,6 +93,8 @@ pub unsafe fn desktop_draw_background() {
     draw_blob(w / 5, hh / 4, hh / 3, 0x3D5AFE, 70);        // blue, upper left
     draw_blob(w * 4 / 5, hh / 3, hh / 4, 0xB447D6, 60);    // magenta, upper right
     draw_blob(w / 2, hh * 9 / 10, hh / 3, 0x1DE9B6, 45);   // teal, bottom center
+
+    compositor::compositor_wallpaper_capture();
 }
 
 pub unsafe fn desktop_draw_taskbar() {

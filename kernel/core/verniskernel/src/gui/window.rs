@@ -364,23 +364,14 @@ pub unsafe fn wm_window_fill_rect(id: u32, x: u32, y: u32, w: u32, h: u32, color
     }
 }
 
-/// Compose all windows onto the compositor back buffer.
-pub unsafe fn wm_compose_all() {
-    let comp = compositor::compositor_get();
-    if !comp.initialized {
-        return;
-    }
-
-    // Draw windows in z-order (back to front)
-    // We need to iterate z_order and find corresponding windows
-    let z_len = WM.z_order.len();
-    for zi in 0..z_len {
-        let wid = WM.z_order[zi];
-        if let Some(w) = WM.windows.iter().find(|w| w.id == wid) {
-            if !w.visible {
-                continue;
-            }
-
+/// Render one window's glass (blur + tint + edges + content) onto the
+/// back buffer. The backdrop under the window must already be fresh
+/// (wallpaper restored) — blur compounds if run on stale glass.
+/// `do_blur = false` skips the frost (used while dragging: tint-only glass
+/// keeps drag frames cheap; the drop triggers a full frosted compose).
+unsafe fn compose_window_glass(w: &Window, do_blur: bool) {
+    {
+        {
             let focused = w.focused;
             let wx = w.x;
             let wy = w.y;
@@ -389,7 +380,9 @@ pub unsafe fn wm_compose_all() {
 
             // --- Glassmorphism window ---
             // 1. Frost the backdrop under the whole window
-            compositor::compositor_blur_rect(wx, wy, ww, wh, 9);
+            if do_blur {
+                compositor::compositor_blur_rect(wx, wy, ww, wh, 9);
+            }
 
             // 2. Glass tint: dark pane over the content, lighter title strip
             compositor::compositor_fill_rect_alpha(
@@ -439,6 +432,14 @@ pub unsafe fn wm_compose_all() {
             );
             compositor::compositor_draw_char_transparent(close_x + 4, close_y, b'X', 0xFFFFFF);
 
+            // Snapshot the finished (pre-content) glass so terminal updates
+            // can restore it with a memcpy instead of re-blurring. Only a
+            // frosted capture is worth keeping — a drag-frame (no blur)
+            // capture would freeze the unfrosted look into the typing path.
+            if do_blur {
+                compositor::compositor_glass_capture(w.id, wx, wy, ww, wh);
+            }
+
             // 6. Window content: black is the transparency key, so terminal
             //    cell backgrounds show the glass instead of solid black
             if !w.content_buf.is_empty() {
@@ -454,6 +455,59 @@ pub unsafe fn wm_compose_all() {
             }
         }
     }
+}
+
+/// Compose all windows onto the compositor back buffer.
+/// `do_blur = false` while dragging (tint-only glass, cheap frames).
+pub unsafe fn wm_compose_all(do_blur: bool) {
+    let comp = compositor::compositor_get();
+    if !comp.initialized {
+        return;
+    }
+
+    // Draw windows in z-order (back to front)
+    let z_len = WM.z_order.len();
+    for zi in 0..z_len {
+        let wid = WM.z_order[zi];
+        if let Some(w) = WM.windows.iter().find(|w| w.id == wid) {
+            if !w.visible {
+                continue;
+            }
+            compose_window_glass(w, do_blur);
+        }
+    }
+}
+
+/// Recompose a single window's glass. Partial-compose fast path: the caller
+/// must have restored the wallpaper under the window rect first.
+pub unsafe fn wm_compose_by_id(id: u32) -> bool {
+    if let Some(w) = WM.windows.iter().find(|w| w.id == id) {
+        if w.visible {
+            compose_window_glass(w, true);
+            return true;
+        }
+    }
+    false
+}
+
+/// Blit just a window's content (color-keyed) — used by the typing fast
+/// path after the cached glass base has been restored.
+pub unsafe fn wm_blit_content_by_id(id: u32) -> bool {
+    if let Some(w) = WM.windows.iter().find(|w| w.id == id) {
+        if w.visible && !w.content_buf.is_empty() {
+            compositor::compositor_blit_colorkey(
+                w.content_buf.as_ptr(),
+                w.content_x(),
+                w.content_y(),
+                w.content_width(),
+                w.content_height(),
+                w.content_pitch,
+                0x000000,
+            );
+            return true;
+        }
+    }
+    false
 }
 
 /// Hit-test: which window is under (mx, my)? Returns window ID or None.

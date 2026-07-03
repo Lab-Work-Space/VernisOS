@@ -14,6 +14,8 @@ extern "C" {
     fn kernel_get_ticks() -> u32;
     fn kernel_get_timer_hz() -> u32;
     fn cli_gui_tick();
+    fn serial_print(s: *const u8);
+    fn serial_print_dec(v: u32);
 }
 
 /// Previous mouse button state for detecting press/release edges.
@@ -21,6 +23,7 @@ static mut PREV_BUTTONS: u8 = 0;
 static mut LAST_FRAME_TICK: u32 = 0;
 static mut LAST_CURSOR_X: i32 = -1;  // Cache cursor position to skip redundant renders
 static mut LAST_CURSOR_Y: i32 = -1;
+static mut LAST_FULL_COMPOSE_TICK: u32 = 0;  // drag-throttle for full composes
 
 const GUI_MAX_EVENTS_PER_TICK: usize = 64;
 
@@ -90,7 +93,8 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
 
     let mut had_events = false;
     let mut had_mouse_move = false;
-    let mut had_non_move_event = false;
+    let mut had_mouse_button = false;
+    let mut had_key = false;
     let mut processed_events = 0usize;
 
     // 1. Process all queued events
@@ -100,11 +104,11 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
         had_events = true;
         match ev.kind {
             event::EventKind::MouseDown => {
-                had_non_move_event = true;
+                had_mouse_button = true;
                 handle_mouse_down(ev.mouse_x, ev.mouse_y, ev.button);
             }
             event::EventKind::MouseUp => {
-                had_non_move_event = true;
+                had_mouse_button = true;
                 handle_mouse_up(ev.mouse_x, ev.mouse_y);
             }
             event::EventKind::MouseMove => {
@@ -112,7 +116,7 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
                 handle_mouse_move(ev.mouse_x, ev.mouse_y);
             }
             event::EventKind::KeyPress => {
-                had_non_move_event = true;
+                had_key = true;
                 handle_key_press(ev.scancode);
             }
             event::EventKind::KeyRelease | event::EventKind::None => {}
@@ -125,8 +129,10 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
         terminal::terminal_render();
     }
 
-    // 3. Only compose and present if something changed
-    let need_compose = had_events || term_was_dirty;
+    // 3. Only compose and present if something changed. wm_windows_dirty()
+    //    must be included: a drag-throttled tick can leave layout changes
+    //    pending with no new events.
+    let need_compose = had_events || term_was_dirty || window::wm_windows_dirty();
     if !need_compose {
         return;
     }
@@ -134,9 +140,11 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
     // Fast path: only mouse movement (no dragging / no terminal updates)
     // -> update cursor incrementally and present only dirty cursor region.
     let cursor_only = had_mouse_move
-        && !had_non_move_event
+        && !had_mouse_button
+        && !had_key
         && !term_was_dirty
-        && !window::wm_is_dragging();
+        && !window::wm_is_dragging()
+        && !window::wm_windows_dirty();
 
     if cursor_only {
         let mx = mouse::mouse_get_x();
@@ -154,15 +162,35 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
         return;
     }
 
-    // Glassmorphism requires a full compose whenever anything changed:
-    // window glass is blurred/tinted from the wallpaper behind it, so the
-    // backdrop must be redrawn before windows re-blur it (re-blurring an
-    // already-composited frame would compound the blur each frame).
-    if had_non_move_event || window::wm_windows_dirty() || term_was_dirty {
+    // Glass must always be re-blurred from a fresh backdrop (re-blurring a
+    // composited frame compounds the blur). Two tiers:
+    //  - layout change (click/drag/focus/close): full compose, throttled
+    //    to ~60fps while dragging
+    //  - typing / terminal output only: partial compose — restore the
+    //    wallpaper under the window, re-frost just that window, present
+    //    just that rect (avoids the 2Mpx repaint + 8MB MMIO copy per key)
+    let layout_dirty = had_mouse_button || window::wm_windows_dirty();
+    if layout_dirty {
+        let dragging = window::wm_is_dragging();
+        if dragging && current_tick.wrapping_sub(LAST_FULL_COMPOSE_TICK) < 4 {
+            return; // wins_dirty stays set; a later tick composes the final state
+        }
+        // While dragging: tint-only glass (no blur) keeps frames cheap
+        // under TCG; the drop composes once more with full frost.
         desktop::desktop_draw_background();
-        window::wm_compose_all();
+        window::wm_compose_all(!dragging);
         desktop::desktop_draw_taskbar();
         window::wm_windows_rendered();
+        LAST_FULL_COMPOSE_TICK = current_tick;
+    } else if had_key || term_was_dirty {
+        if !partial_compose_single_window() {
+            // Fallback (multiple windows / taskbar overlap): full compose
+            desktop::desktop_draw_background();
+            window::wm_compose_all(true);
+            desktop::desktop_draw_taskbar();
+            window::wm_windows_rendered();
+            LAST_FULL_COMPOSE_TICK = current_tick;
+        }
     } else {
         // No changes at all—this shouldn't happen (caught earlier), but safety check
         return;
@@ -177,6 +205,47 @@ pub unsafe extern "C" fn gui_main_loop_tick() {
 
     // 6. Present to framebuffer (only dirty region via dirty rect system)
     compositor::compositor_present();
+
+    // Perf telemetry: warn when one compose+present exceeds 8 ticks (~33ms)
+    let spent = kernel_get_ticks().wrapping_sub(current_tick);
+    if spent > 8 {
+        serial_print(b"[gui] slow compose: ticks=\0".as_ptr());
+        serial_print_dec(spent);
+        serial_print(b"\n\0".as_ptr());
+    }
+}
+
+/// Partial-compose fast path for terminal updates: valid only with a single
+/// visible window that doesn't overlap the taskbar.
+/// Preferred: restore the window's cached glass base (memcpy — no blur at
+/// all) and re-blit the content. Fallback within the fast path: restore the
+/// wallpaper rect and re-frost this one window.
+unsafe fn partial_compose_single_window() -> bool {
+    let wm = window::wm_get();
+    if wm.z_order.len() != 1 {
+        return false;
+    }
+    let Some(w) = wm.windows.iter().find(|w| w.visible) else {
+        return false;
+    };
+    let (wx, wy, ww, wh, wid) = (w.x, w.y, w.width, w.height, w.id);
+    let comp = compositor::compositor_get();
+    let bar_y = comp.height.saturating_sub(desktop::taskbar_height()) as i32;
+    if wy + wh as i32 > bar_y {
+        return false; // overlaps taskbar strip — needs a taskbar repaint too
+    }
+
+    // Typing hot path: cached frosted glass + content blit, zero blur.
+    if compositor::compositor_glass_restore(wid, wx, wy, ww, wh) {
+        return window::wm_blit_content_by_id(wid);
+    }
+
+    // Glass cache miss (e.g. first keystroke after boot): re-frost once —
+    // this also repopulates the glass cache for subsequent keystrokes.
+    if !compositor::compositor_wallpaper_restore_rect(wx, wy, ww, wh) {
+        return false; // wallpaper cache not populated yet (first frame)
+    }
+    window::wm_compose_by_id(wid)
 }
 
 /// Handle keyboard input — called from C IRQ handler.

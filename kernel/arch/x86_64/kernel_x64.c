@@ -4340,7 +4340,9 @@ void kernel_main(void) {
     task_register_main(init_pid, 24);   // 100ms quantum at 240 Hz
     {
         uint32_t worker_pid = scheduler_create_process(kernel_scheduler, 9, "worker");
-        int worker_idx = task_create(phase18_worker_entry, worker_pid, 24);
+        // Small quantum: the worker only hlt-loops — a 24-tick (100ms) slice
+        // starves the GUI compositor of wall time (round-robin, no blocking)
+        int worker_idx = task_create(phase18_worker_entry, worker_pid, 2);
         if (worker_idx >= 0) {
             serial_print("[phase18] worker task created (pid=");
             serial_print_dec(worker_pid);
@@ -4356,7 +4358,9 @@ void kernel_main(void) {
         const void *vsh = vfs_find_file("/bin/vsh64");
         if (vsh) {
             serial_print("[phase45] found /bin/vsh64, launching user shell...\n");
-            int elf_slot = elf_exec("/bin/vsh64", 24);
+            // 4-tick quantum: vsh busy-polls stdin (no blocking reads yet);
+            // long slices just steal wall time from the GUI render loop
+            int elf_slot = elf_exec("/bin/vsh64", 4);
             if (elf_slot >= 0) {
                 serial_print("[phase45] user shell task running\n");
             } else {

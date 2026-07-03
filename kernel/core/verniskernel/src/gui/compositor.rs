@@ -8,12 +8,14 @@ use crate::font8x16::VGA_FONT_8X16;
 use crate::framebuffer::{FONT_WIDTH, FONT_HEIGHT, write_pixel_buf, read_pixel_buf};
 
 /// Blend src over dst with alpha 0..=255 (per-channel, 0xRRGGBB colors).
+/// Shift-based: TCG-emulated QEMU makes per-pixel integer division brutal.
 #[inline(always)]
 pub fn blend_px(dst: u32, src: u32, alpha: u32) -> u32 {
-    let inv = 255 - alpha;
-    let r = ((src >> 16 & 0xFF) * alpha + (dst >> 16 & 0xFF) * inv) / 255;
-    let g = ((src >> 8 & 0xFF) * alpha + (dst >> 8 & 0xFF) * inv) / 255;
-    let b = ((src & 0xFF) * alpha + (dst & 0xFF) * inv) / 255;
+    let a = alpha + (alpha >> 7); // 0..=256
+    let inv = 256 - a;
+    let r = ((src >> 16 & 0xFF) * a + (dst >> 16 & 0xFF) * inv) >> 8;
+    let g = ((src >> 8 & 0xFF) * a + (dst >> 8 & 0xFF) * inv) >> 8;
+    let b = ((src & 0xFF) * a + (dst & 0xFF) * inv) >> 8;
     (r << 16) | (g << 8) | b
 }
 
@@ -52,12 +54,19 @@ impl DirtyRect {
 
 // The back buffer lives in a dedicated identity-mapped physical region, NOT
 // the Rust heap: the buddy allocator rounds allocations up to a power of two,
-// so a ~6-8MB buffer would demand an 8-16MB block the 8MB kernel heap can
-// never provide. Region: 48MB..64MB physical (16MB), far above the kernel
-// image/BSS (~9.3MB), the frame allocator pool (ends ~13.3MB), and the kernel
-// stack (15MB); well inside the 128MB identity map and the 64MB minimum RAM.
+// so a ~8MB buffer would demand a block the 8MB kernel heap can never
+// provide. Layout: back buffer at 48MB, wallpaper cache at 56MB (8MB each),
+// far above the kernel image/BSS (~9.3MB), the frame allocator pool (ends
+// ~13.3MB), and the kernel stack (15MB); inside the 128MB identity map.
+// The wallpaper cache holds the fully-painted gradient+blobs backdrop so a
+// compose restores it with a memcpy instead of re-painting 2M pixels.
 const BACK_BUFFER_PHYS: usize = 0x0300_0000;
-const BACK_BUFFER_MAX: usize = 16 * 1024 * 1024;
+const WALLPAPER_PHYS: usize = 0x0380_0000;
+// Glass-base cache (64MB): the focused window's finished glass (blur + tint
+// + edges + title, WITHOUT content) so typing restores it with a memcpy
+// instead of re-blurring ~440K pixels per keystroke.
+const GLASS_CACHE_PHYS: usize = 0x0400_0000;
+const BACK_BUFFER_MAX: usize = 8 * 1024 * 1024;
 
 /// Raw-pointer back buffer with a Vec-like accessor surface.
 pub struct BackBuffer(pub *mut u8);
@@ -70,6 +79,12 @@ impl BackBuffer {
 
 pub struct Compositor {
     pub back_buffer: BackBuffer,
+    pub wallpaper: BackBuffer,      // cached fully-painted backdrop
+    pub wallpaper_valid: bool,
+    pub glass: BackBuffer,          // cached finished glass of one window
+    pub glass_valid: bool,
+    pub glass_id: u32,              // window the glass cache belongs to
+    pub glass_rect: DirtyRect,      // screen rect the cache covers
     pub width: u32,
     pub height: u32,
     pub pitch: u32,   // bytes per scanline in back buffer
@@ -81,6 +96,12 @@ pub struct Compositor {
 
 static mut COMP: Compositor = Compositor {
     back_buffer: BackBuffer(core::ptr::null_mut()),
+    wallpaper: BackBuffer(core::ptr::null_mut()),
+    wallpaper_valid: false,
+    glass: BackBuffer(core::ptr::null_mut()),
+    glass_valid: false,
+    glass_id: 0,
+    glass_rect: DirtyRect { x: 0, y: 0, w: 0, h: 0 },
     width: 0,
     height: 0,
     pitch: 0,
@@ -103,6 +124,10 @@ pub unsafe fn compositor_init(width: u32, height: u32, bpp: u32) {
     }
 
     COMP.back_buffer = BackBuffer(BACK_BUFFER_PHYS as *mut u8);
+    COMP.wallpaper = BackBuffer(WALLPAPER_PHYS as *mut u8);
+    COMP.wallpaper_valid = false;
+    COMP.glass = BackBuffer(GLASS_CACHE_PHYS as *mut u8);
+    COMP.glass_valid = false;
     ptr::write_bytes(COMP.back_buffer.as_mut_ptr(), 0, size);
     COMP.width = width;
     COMP.height = height;
@@ -428,6 +453,93 @@ unsafe fn clip_rect(x: i32, y: i32, w: u32, h: u32) -> Option<(u32, u32, u32, u3
     Some((x0, y0, x1, y1))
 }
 
+/// Snapshot the current back buffer into the wallpaper cache. Call once,
+/// right after the backdrop (gradient + blobs) has been painted.
+pub unsafe fn compositor_wallpaper_capture() {
+    if !COMP.initialized || COMP.wallpaper.as_mut_ptr().is_null() {
+        return;
+    }
+    let total = (COMP.height * COMP.pitch) as usize;
+    ptr::copy_nonoverlapping(COMP.back_buffer.as_ptr(), COMP.wallpaper.as_mut_ptr(), total);
+    COMP.wallpaper_valid = true;
+}
+
+/// Restore the whole backdrop from the wallpaper cache (memcpy instead of
+/// repainting ~2M pixels). Returns false if the cache isn't populated yet.
+pub unsafe fn compositor_wallpaper_restore_full() -> bool {
+    if !COMP.initialized || !COMP.wallpaper_valid {
+        return false;
+    }
+    let total = (COMP.height * COMP.pitch) as usize;
+    ptr::copy_nonoverlapping(COMP.wallpaper.as_ptr(), COMP.back_buffer.as_mut_ptr(), total);
+    compositor_mark_dirty_rect(0, 0, COMP.width, COMP.height);
+    COMP.dirty = true;
+    true
+}
+
+/// Restore only a rect of the backdrop from the wallpaper cache — the heart
+/// of the partial-compose path (e.g. re-frosting just the terminal window).
+pub unsafe fn compositor_wallpaper_restore_rect(x: i32, y: i32, w: u32, h: u32) -> bool {
+    if !COMP.initialized || !COMP.wallpaper_valid {
+        return false;
+    }
+    let Some((x0, y0, x1, y1)) = clip_rect(x, y, w, h) else { return true; };
+    let bpp_bytes = (COMP.bpp / 8) as usize;
+    let row_bytes = ((x1 - x0) as usize) * bpp_bytes;
+    for row in y0..y1 {
+        let off = (row * COMP.pitch) as usize + x0 as usize * bpp_bytes;
+        ptr::copy_nonoverlapping(
+            COMP.wallpaper.as_ptr().add(off),
+            COMP.back_buffer.as_mut_ptr().add(off),
+            row_bytes,
+        );
+    }
+    compositor_mark_dirty_rect(x, y, w, h);
+    COMP.dirty = true;
+    true
+}
+
+/// Copy a screen rect between the back buffer and another same-layout buffer.
+unsafe fn copy_rect_between(src: *const u8, dst: *mut u8, x: i32, y: i32, w: u32, h: u32) {
+    let Some((x0, y0, x1, y1)) = clip_rect(x, y, w, h) else { return; };
+    let bpp_bytes = (COMP.bpp / 8) as usize;
+    let row_bytes = ((x1 - x0) as usize) * bpp_bytes;
+    for row in y0..y1 {
+        let off = (row * COMP.pitch) as usize + x0 as usize * bpp_bytes;
+        ptr::copy_nonoverlapping(src.add(off), dst.add(off), row_bytes);
+    }
+}
+
+/// Snapshot a window's finished glass (pre-content) from the back buffer.
+pub unsafe fn compositor_glass_capture(id: u32, x: i32, y: i32, w: u32, h: u32) {
+    if !COMP.initialized || COMP.glass.as_mut_ptr().is_null() {
+        return;
+    }
+    copy_rect_between(COMP.back_buffer.as_ptr(), COMP.glass.as_mut_ptr(), x, y, w, h);
+    COMP.glass_id = id;
+    COMP.glass_rect = DirtyRect::new(x, y, w, h);
+    COMP.glass_valid = true;
+}
+
+/// Restore a window's cached glass to the back buffer. Returns false if the
+/// cache doesn't match this window/rect (layout changed since capture).
+pub unsafe fn compositor_glass_restore(id: u32, x: i32, y: i32, w: u32, h: u32) -> bool {
+    if !COMP.initialized || !COMP.glass_valid || COMP.glass_id != id
+        || COMP.glass_rect.x != x || COMP.glass_rect.y != y
+        || COMP.glass_rect.w != w || COMP.glass_rect.h != h
+    {
+        return false;
+    }
+    copy_rect_between(COMP.glass.as_ptr(), COMP.back_buffer.as_mut_ptr(), x, y, w, h);
+    compositor_mark_dirty_rect(x, y, w, h);
+    COMP.dirty = true;
+    true
+}
+
+pub unsafe fn compositor_glass_invalidate() {
+    COMP.glass_valid = false;
+}
+
 /// Scratch line buffer for the separable box blur (one row or column).
 static mut BLUR_SCRATCH: Vec<u32> = Vec::new();
 
@@ -447,32 +559,30 @@ pub unsafe fn compositor_blur_rect(x: i32, y: i32, w: u32, h: u32, radius: u32) 
     let buf = COMP.back_buffer.as_mut_ptr();
     let pitch = COMP.pitch as usize;
 
-    let need = rw.max(rh);
+    // 2x: second half is the output line for the (non-32bpp) generic path —
+    // the sliding window must keep reading unmodified input values.
+    let need = rw.max(rh) * 2;
     if BLUR_SCRATCH.len() < need {
         BLUR_SCRATCH.resize(need, 0);
     }
     let line = BLUR_SCRATCH.as_mut_ptr();
+    let out_line = line.add(need / 2);
 
-    // Horizontal pass
-    for row in 0..rh {
-        let row_base = buf.add((y0 as usize + row) * pitch + x0 as usize * bpp_bytes);
-        for i in 0..rw {
-            *line.add(i) = read_pixel_buf(row_base.add(i * bpp_bytes), bpp);
-        }
+    // Sliding-window average over one line already loaded into BLUR_SCRATCH;
+    // write_out stores the result with the given element stride.
+    unsafe fn blur_line_u32(line: *mut u32, len: usize, r: usize, out: *mut u32, stride: usize) {
         let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
         let mut count = 0u32;
-        // Prime window [0, r]
-        for i in 0..=(r.min(rw - 1)) {
+        for i in 0..=(r.min(len - 1)) {
             let p = *line.add(i);
             sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
             count += 1;
         }
-        for i in 0..rw {
-            let out = ((sr / count) << 16) | ((sg / count) << 8) | (sb / count);
-            write_pixel_buf(row_base.add(i * bpp_bytes), out, bpp);
-            // Slide window: add i+r+1, remove i-r
+        for i in 0..len {
+            let v = ((sr / count) << 16) | ((sg / count) << 8) | (sb / count);
+            *out.add(i * stride) = v;
             let add_i = i + r + 1;
-            if add_i < rw {
+            if add_i < len {
                 let p = *line.add(add_i);
                 sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
                 count += 1;
@@ -485,32 +595,41 @@ pub unsafe fn compositor_blur_rect(x: i32, y: i32, w: u32, h: u32, radius: u32) 
         }
     }
 
-    // Vertical pass
-    for col in 0..rw {
-        let col_base = buf.add(y0 as usize * pitch + (x0 as usize + col) * bpp_bytes);
-        for i in 0..rh {
-            *line.add(i) = read_pixel_buf(col_base.add(i * pitch), bpp);
+    if bpp == 32 {
+        // Fast path: direct u32 loads/stores (per-pixel helper calls are
+        // ruinous under TCG-emulated QEMU)
+        let pitch4 = pitch / 4;
+        let base32 = (buf as *mut u32).add(y0 as usize * pitch4 + x0 as usize);
+        for row in 0..rh {
+            let rp = base32.add(row * pitch4);
+            for i in 0..rw { *line.add(i) = *rp.add(i); }
+            blur_line_u32(line, rw, r, rp, 1);
         }
-        let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
-        let mut count = 0u32;
-        for i in 0..=(r.min(rh - 1)) {
-            let p = *line.add(i);
-            sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
-            count += 1;
+        for col in 0..rw {
+            let cp = base32.add(col);
+            for i in 0..rh { *line.add(i) = *cp.add(i * pitch4); }
+            blur_line_u32(line, rh, r, cp, pitch4);
         }
-        for i in 0..rh {
-            let out = ((sr / count) << 16) | ((sg / count) << 8) | (sb / count);
-            write_pixel_buf(col_base.add(i * pitch), out, bpp);
-            let add_i = i + r + 1;
-            if add_i < rh {
-                let p = *line.add(add_i);
-                sr += p >> 16 & 0xFF; sg += p >> 8 & 0xFF; sb += p & 0xFF;
-                count += 1;
+    } else {
+        // Generic 24bpp path
+        for row in 0..rh {
+            let row_base = buf.add((y0 as usize + row) * pitch + x0 as usize * bpp_bytes);
+            for i in 0..rw {
+                *line.add(i) = read_pixel_buf(row_base.add(i * bpp_bytes), bpp);
             }
-            if i >= r {
-                let p = *line.add(i - r);
-                sr -= p >> 16 & 0xFF; sg -= p >> 8 & 0xFF; sb -= p & 0xFF;
-                count -= 1;
+            blur_line_u32(line, rw, r, out_line, 1);
+            for i in 0..rw {
+                write_pixel_buf(row_base.add(i * bpp_bytes), *out_line.add(i), bpp);
+            }
+        }
+        for col in 0..rw {
+            let col_base = buf.add(y0 as usize * pitch + (x0 as usize + col) * bpp_bytes);
+            for i in 0..rh {
+                *line.add(i) = read_pixel_buf(col_base.add(i * pitch), bpp);
+            }
+            blur_line_u32(line, rh, r, out_line, 1);
+            for i in 0..rh {
+                write_pixel_buf(col_base.add(i * pitch), *out_line.add(i), bpp);
             }
         }
     }
@@ -528,12 +647,23 @@ pub unsafe fn compositor_fill_rect_alpha(x: i32, y: i32, w: u32, h: u32, color: 
     let bpp = COMP.bpp;
     let bpp_bytes = (bpp / 8) as usize;
     let buf = COMP.back_buffer.as_mut_ptr();
-    for row in y0..y1 {
-        let row_base = buf.add((row * COMP.pitch) as usize + x0 as usize * bpp_bytes);
-        for col in 0..(x1 - x0) as usize {
-            let p = row_base.add(col * bpp_bytes);
-            let dst = read_pixel_buf(p, bpp);
-            write_pixel_buf(p, blend_px(dst, color, alpha), bpp);
+    if bpp == 32 {
+        let pitch4 = (COMP.pitch / 4) as usize;
+        for row in y0..y1 {
+            let rp = (buf as *mut u32).add(row as usize * pitch4 + x0 as usize);
+            for col in 0..(x1 - x0) as usize {
+                let p = rp.add(col);
+                *p = blend_px(*p, color, alpha);
+            }
+        }
+    } else {
+        for row in y0..y1 {
+            let row_base = buf.add((row * COMP.pitch) as usize + x0 as usize * bpp_bytes);
+            for col in 0..(x1 - x0) as usize {
+                let p = row_base.add(col * bpp_bytes);
+                let dst = read_pixel_buf(p, bpp);
+                write_pixel_buf(p, blend_px(dst, color, alpha), bpp);
+            }
         }
     }
     compositor_mark_dirty_rect(x, y, w, h);
@@ -562,13 +692,28 @@ pub unsafe fn compositor_blit_colorkey(
     let src_x_off = (x0 as i32 - dst_x) as usize;
     let src_y_off = (y0 as i32 - dst_y) as usize;
 
-    for row in 0..(y1 - y0) as usize {
-        let src_row = src.add((src_y_off + row) * src_pitch as usize + src_x_off * bpp_bytes);
-        let dst_row = buf.add(((y0 as usize + row) * COMP.pitch as usize) + x0 as usize * bpp_bytes);
-        for col in 0..(x1 - x0) as usize {
-            let px = read_pixel_buf(src_row.add(col * bpp_bytes), bpp);
-            if px != key {
-                write_pixel_buf(dst_row.add(col * bpp_bytes), px, bpp);
+    if bpp == 32 {
+        let pitch4 = (COMP.pitch / 4) as usize;
+        let src_pitch4 = (src_pitch / 4) as usize;
+        for row in 0..(y1 - y0) as usize {
+            let sp = (src as *const u32).add((src_y_off + row) * src_pitch4 + src_x_off);
+            let dp = (buf as *mut u32).add((y0 as usize + row) * pitch4 + x0 as usize);
+            for col in 0..(x1 - x0) as usize {
+                let px = *sp.add(col);
+                if px != key {
+                    *dp.add(col) = px;
+                }
+            }
+        }
+    } else {
+        for row in 0..(y1 - y0) as usize {
+            let src_row = src.add((src_y_off + row) * src_pitch as usize + src_x_off * bpp_bytes);
+            let dst_row = buf.add(((y0 as usize + row) * COMP.pitch as usize) + x0 as usize * bpp_bytes);
+            for col in 0..(x1 - x0) as usize {
+                let px = read_pixel_buf(src_row.add(col * bpp_bytes), bpp);
+                if px != key {
+                    write_pixel_buf(dst_row.add(col * bpp_bytes), px, bpp);
+                }
             }
         }
     }

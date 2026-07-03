@@ -582,6 +582,19 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ Trade-off: ทุก event ต้อง full compose (glass ต้อง re-blur จาก wallpaper ที่วาดใหม่)
         └─ cursor-only fast path ยังคงอยู่ (ไม่ compose)
       └─ Verified: boot + help + typing ทั้ง x86/x64 ที่ 1920×1080 ผ่าน QEMU screendump
+      └─ Perf pass (2026-07-03) — แก้อาการหน่วงหลังเปิด glassmorphism:
+        └─ สาเหตุหลัก: ทุก event ทำ full compose 2Mpx (repaint wallpaper + blur) + present 8MB
+          บน QEMU TCG (ไม่มี accel บน Apple Silicon สำหรับ x86 guest) + task quantum 24 ticks
+          ทำให้ GUI ได้ wall time แค่ ~1/3
+        └─ Wallpaper cache (56MB region): วาด gradient+blobs ครั้งเดียว → restore ด้วย memcpy
+        └─ Glass-base cache (64MB region): แช่แข็ง blur+tint+ขอบ+title ของหน้าต่าง →
+          การพิมพ์ restore memcpy + blit content เท่านั้น (ศูนย์ blur ต่อ keystroke)
+        └─ Drag: no-blur (tint-only) ระหว่างลาก + throttle ~60fps, frost เต็มตอนปล่อย
+        └─ blend_px ใช้ shift แทน div, blur มี 32bpp fast path, blob ใช้ reciprocal mul
+        └─ Task quanta: worker 24→2, vsh 24→4 ticks (ทั้งคู่ busy/hlt-loop กิน wall time เปล่า)
+        └─ Telemetry: "[gui] slow compose: ticks=N" เมื่อ compose+present > 8 ticks (~33ms)
+        └─ ผลวัด: typing ไม่มี slow-compose warning (จากเดิม ~150 ticks/คีย์),
+          drag frame ~45-70 ticks (เดิม 144-487), boot compose 203 (เดิม 445)
 
     Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — audit 2026-07-02: มี userlib/getty.c + login.c + Makefile rules + mkfs support จริง แต่ syscalls SETUID/GETUID/CHDIR/GETCWD/UMASK (79–85) ไม่มีใน kernel (syscall สูงสุดคือ SYS_SYNC=78)
       └─ /sbin/getty: display login prompt, fork + exec /bin/login
