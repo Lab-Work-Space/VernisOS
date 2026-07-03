@@ -167,6 +167,8 @@ Programs in `userlib/` use bare-metal cross-compilers (no libc). Pattern: `crt0_
 
 Load addresses: code at `0x10000000`, mmap region at `0x20000000` (x64) / `0x30000000` (x86).
 
+Each user process has its own address space (`TaskSlot.pml4` on x64, `.pd` on x86). `paging_create_address_space` clones the 0–1GB paging chain — kernel identity + framebuffer mappings are shared by value, the user range starts empty. CR3 is switched on context switch (timer), execve, exit and kill. `elf_exec`/`execve` build into a fresh space then free the old one *after* switching CR3 (never free what CR3 still points at); `fork` deep-copies every mapped user page. Frames are reclaimed via `frame_free` into a free-list, so exec/exit/kill cycles don't exhaust the pool. `/sbin/init{32,64}` (userlib/init.c) boots as the first user process; a kernel "kinit" task is the fallback if init is absent.
+
 To add a new user program:
 1. Create `userlib/myprog.c` using `syscall.h` + `libc.h`
 2. Add compile + link rules to `Makefile` following the `getty`/`login` pattern
@@ -190,7 +192,7 @@ All intermediate files go under `make/` (not committed):
 |-----------|----------|--------|
 | TCP extras | `kernel/net/tcp.c` | Core works (handshake/data/close, checksum); no sliding window, data retransmit, OOO reassembly |
 | Socket fd model | — | UDP/TCP not exposed as file descriptors yet (Phase 52) |
-| Per-process address spaces | `kernel/arch/*/kernel_*.c` | All user tasks share one PML4/page-dir; successful execve in a forked child overwrites the parent at 0x10000000. Blocks userland /sbin/init (built but unused); kernel "kinit" respawner task provides respawn semantics instead |
+| Copy-on-write fork | `kernel/arch/*/kernel_*.c` | Per-process address spaces exist (each task has its own PML4/page-dir, CR3 switched on context switch); fork does a full deep page copy, not CoW. Frames come from a free-list on top of the bump allocator |
 | FAT32 driver | `kernel/fs/fat32.c` | 3-line stub — ignore STATUS.md claim |
 | ext2 driver | `kernel/fs/ext2.c` | 3-line stub |
 | NTFS driver | `kernel/fs/ntfs.c` | 3-line stub |

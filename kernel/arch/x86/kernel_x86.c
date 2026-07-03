@@ -1118,6 +1118,7 @@ typedef struct {
     uint32_t brk;
     VmaEntry32 vma_list[VMA_MAX_PER_TASK]; // Phase 46: mmap regions
     uint32_t mmap_next;            // Phase 46: next mmap virtual address
+    uint32_t *pd;                  // per-process address space (kernel tasks: kernel_page_dir)
     uint16_t uid;                  // Phase 60: user/group credentials
     uint16_t gid;
     uint16_t file_umask;           // Phase 60: file-creation mask
@@ -1127,6 +1128,14 @@ typedef struct {
 
 static TaskSlot32 task_slots[MAX_TASKS];
 static int        current_task_idx      = -1;
+// Per-process address-space helpers (defined in the paging section below)
+void *memcpy(void *dest, const void *src, unsigned long n);
+static uint32_t *paging_get_kernel_pd_ptr(void);
+uint32_t *paging_create_address_space_32(void);
+static void paging_free_user_space_32(uint32_t *pd);
+static int  paging_clone_user_pages_32(uint32_t *dst_pd, uint32_t *src_pd);
+static void frame_free_32(uint32_t frame);
+static void task_switch_cr3_32(int idx);
 static int        context_switch_enabled = 0;
 static uint32_t   context_switch_count  = 0;
 
@@ -1429,7 +1438,7 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
                             }
                         }
 
-                        paging_map_4k_32(kernel_page_dir, page_va, fr, pg_flags);
+                        paging_map_4k_32(task_slots[current_task_idx].pd ? task_slots[current_task_idx].pd : kernel_page_dir, page_va, fr, pg_flags);
                         paging_flush_tlb_32();
                         serial_print("[demand-page] va=0x");
                         serial_print_hex(page_va);
@@ -1465,7 +1474,13 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
                     serial_print("[EXCEPTION] switching to task ");
                     serial_print_dec(next);
                     serial_print("\n");
+                    uint32_t *dead_pd = task_slots[current_task_idx].pd;
+                    task_slots[current_task_idx].pd = 0;
                     current_task_idx = next;
+                    kernel_tss32.esp0 = (uint32_t)(task_slots[next].stack + TASK_STACK_SIZE);
+                    task_switch_cr3_32(next);
+                    if (dead_pd && dead_pd != paging_get_kernel_pd_ptr())
+                        paging_free_user_space_32(dead_pd);
                     return task_slots[next].esp;
                 }
             }
@@ -1517,6 +1532,7 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
                     // Update TSS esp0 so Ring 3→Ring 0 transitions
                     // land on the correct per-task kernel stack.
                     kernel_tss32.esp0 = (uint32_t)(task_slots[next].stack + TASK_STACK_SIZE);
+                    task_switch_cr3_32(next);       // per-process paging
                     return task_slots[next].esp;   // asm switches ESP
                 }
             }
@@ -1585,8 +1601,13 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
                 serial_print_dec(a1);
                 serial_print("\n");
                 if (next >= 0) {
+                    uint32_t *dead_pd = task_slots[current_task_idx].pd;
+                    task_slots[current_task_idx].pd = 0;
                     current_task_idx = next;
                     kernel_tss32.esp0 = (uint32_t)(task_slots[next].stack + TASK_STACK_SIZE);
+                    task_switch_cr3_32(next);
+                    if (dead_pd && dead_pd != paging_get_kernel_pd_ptr())
+                        paging_free_user_space_32(dead_pd);
                     return task_slots[next].esp;
                 }
             }
@@ -1624,8 +1645,12 @@ uint32_t interrupt_dispatch(InterruptFrame32 *frame) {
                     for (int ti = 0; ti < MAX_TASKS; ti++) {
                         if (task_slots[ti].active && task_slots[ti].pid == dst_pid
                             && ti != current_task_idx) {
+                            uint32_t *victim_pd = task_slots[ti].pd;
+                            task_slots[ti].pd = 0;
                             task_slots[ti].active = 0;
                             scheduler_kill_process(sched, dst_pid);
+                            if (victim_pd && victim_pd != paging_get_kernel_pd_ptr())
+                                paging_free_user_space_32(victim_pd);
                             break;
                         }
                     }
@@ -1775,7 +1800,23 @@ static uint32_t phys_next_free;
 static uint32_t phys_alloc_end;
 static uint32_t phys_frames_used;
 
+#define FRAME_FREELIST_MAX 2048
+static uint32_t frame_freelist_32[FRAME_FREELIST_MAX];
+static int      frame_freelist_count_32;
+
+static void frame_free_32(uint32_t frame) {
+    if (!frame) return;
+    if (frame_freelist_count_32 < FRAME_FREELIST_MAX)
+        frame_freelist_32[frame_freelist_count_32++] = frame;
+}
+
 static uint32_t frame_alloc_32(void) {
+    if (frame_freelist_count_32 > 0) {
+        uint32_t f = frame_freelist_32[--frame_freelist_count_32];
+        volatile uint8_t *zp = (volatile uint8_t *)f;
+        for (int zi = 0; zi < PAGE_SIZE; zi++) zp[zi] = 0;
+        return f;
+    }
     if (phys_next_free >= phys_alloc_end) {
         serial_print("[paging] FATAL: out of page frames\n");
         return 0;
@@ -1808,13 +1849,64 @@ static void paging_map_4k_32(uint32_t *pd, uint32_t virt, uint32_t phys, uint32_
     pt[pt_idx] = (phys & 0xFFFFF000) | flags | PAGE_PRESENT_32;
 }
 
-// Create a new address space for a user process (copies kernel entries).
+// Create a new address space for a user process: kernel entries (PSE
+// identity + framebuffer) shared by value; the user range (PDEs 64..255,
+// va 0x10000000-0x40000000) starts empty.
 uint32_t *paging_create_address_space_32(void) {
     uint32_t frame = frame_alloc_32();
     if (!frame) return (uint32_t *)0;
     uint32_t *new_pd = (uint32_t *)frame;
-    for (int i = 0; i < 1024; i++) new_pd[i] = kernel_page_dir[i];
+    for (int i = 0; i < 1024; i++) {
+        uint32_t e = kernel_page_dir[i];
+        if (i >= 64 && i < 256 && (e & PAGE_PRESENT_32) && !(e & PAGE_PS_32))
+            e = 0;   // never inherit another process's user page tables
+        new_pd[i] = e;
+    }
     return new_pd;
+}
+
+// Free a process address space (user frames + page tables + the dir).
+static void paging_free_user_space_32(uint32_t *pd) {
+    if (!pd || pd == kernel_page_dir) return;
+    for (int i = 64; i < 256; i++) {
+        if (!(pd[i] & PAGE_PRESENT_32) || (pd[i] & PAGE_PS_32)) continue;
+        uint32_t *pt = (uint32_t *)(pd[i] & 0xFFFFF000);
+        for (int j = 0; j < 1024; j++)
+            if (pt[j] & PAGE_PRESENT_32) frame_free_32(pt[j] & 0xFFFFF000);
+        frame_free_32((uint32_t)pt);
+    }
+    frame_free_32((uint32_t)pd);
+}
+
+// fork: deep-copy every mapped user page.
+static int paging_clone_user_pages_32(uint32_t *dst_pd, uint32_t *src_pd) {
+    for (int i = 64; i < 256; i++) {
+        if (!(src_pd[i] & PAGE_PRESENT_32) || (src_pd[i] & PAGE_PS_32)) continue;
+        uint32_t *pt = (uint32_t *)(src_pd[i] & 0xFFFFF000);
+        for (int j = 0; j < 1024; j++) {
+            if (!(pt[j] & PAGE_PRESENT_32)) continue;
+            uint32_t src_frame = pt[j] & 0xFFFFF000;
+            uint32_t flags = pt[j] & 0xFFF;
+            uint32_t nf = frame_alloc_32();
+            if (!nf) return -1;
+            memcpy((void *)nf, (const void *)src_frame, PAGE_SIZE);
+            uint32_t va = ((uint32_t)i << 22) | ((uint32_t)j << 12);
+            paging_map_4k_32(dst_pd, va, nf, flags);
+        }
+    }
+    return 0;
+}
+
+static uint32_t *paging_get_kernel_pd_ptr(void) { return kernel_page_dir; }
+
+// Load a task's address space if it isn't already active.
+static void task_switch_cr3_32(int idx) {
+    uint32_t *target = (idx >= 0 && task_slots[idx].pd)
+                           ? task_slots[idx].pd : kernel_page_dir;
+    uint32_t cur;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cur));
+    if (cur != (uint32_t)target)
+        __asm__ volatile("mov %0, %%cr3" : : "r"((uint32_t)target) : "memory");
 }
 
 // Flush TLB
@@ -1915,6 +2007,7 @@ static int task_create_32(void (*entry)(void), uint32_t pid, uint16_t ticks) {
     task_slots[slot].ppid_slot       = 0;
     task_slots[slot].brk             = 0;
     fd_table_init_32(slot);
+    task_slots[slot].pd = paging_get_kernel_pd_ptr();
     task_slots[slot].uid = 0;                  // Phase 60: root creds, / cwd
     task_slots[slot].gid = 0;
     task_slots[slot].file_umask = 022;
@@ -1965,6 +2058,7 @@ static void task_register_main_32(uint32_t pid, uint16_t ticks) {
     task_slots[0].file_umask      = 022;
     task_slots[0].cwd[0]          = '/';
     task_slots[0].cwd[1]          = '\0';
+    task_slots[0].pd              = paging_get_kernel_pd_ptr();
     current_task_idx = 0;
 }
 
@@ -2100,6 +2194,7 @@ static int elf_exec_32(const char *path, uint16_t ticks) {
     task_slots[slot].ppid_slot       = 0;
     task_slots[slot].brk             = 0;
     fd_table_init_32(slot);
+    task_slots[slot].pd = paging_get_kernel_pd_ptr();
     task_slots[slot].uid = 0;                  // Phase 60: root creds, / cwd
     task_slots[slot].gid = 0;
     task_slots[slot].file_umask = 022;
@@ -2107,6 +2202,13 @@ static int elf_exec_32(const char *path, uint16_t ticks) {
     task_slots[slot].cwd[1] = '\0';
     vma_init_32(task_slots[slot].vma_list);    // Phase 46: init VMAs
     task_slots[slot].mmap_next       = 0;
+    // Fresh per-process address space
+    uint32_t *task_pd = paging_create_address_space_32();
+    if (!task_pd) {
+        serial_print("[elf] out of frames for address space\n");
+        task_slots[slot].active = 0;
+        return -1;
+    }
     Elf32_Phdr *phdr = (Elf32_Phdr *)(elf_load_buf_32 + ehdr->e_phoff);
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_LOAD) continue;
@@ -2141,7 +2243,7 @@ static int elf_exec_32(const char *path, uint16_t ticks) {
             }
 
             // PAGE_WRITABLE_32 is required: .data/.bss live in these pages
-            paging_map_4k_32(kernel_page_dir, va, frame,
+            paging_map_4k_32(task_pd, va, frame,
                              PAGE_USER_32 | PAGE_WRITABLE_32);
         }
     }
@@ -2156,9 +2258,10 @@ static int elf_exec_32(const char *path, uint16_t ticks) {
         }
         // Writable, obviously — the missing PAGE_WRITABLE_32 here made the
         // very first user push fault (err=0x7) and killed vsh32 on boot
-        paging_map_4k_32(kernel_page_dir, USER_STACK_TOP_32 - USER_STACK_SIZE_32 + i,
+        paging_map_4k_32(task_pd, USER_STACK_TOP_32 - USER_STACK_SIZE_32 + i,
                          frame, PAGE_USER_32 | PAGE_WRITABLE_32);
     }
+    task_slots[slot].pd = task_pd;
     __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax", "memory");
 
     // Build iret frame on kernel stack
@@ -2249,6 +2352,16 @@ static int32_t sys_fork_32(InterruptFrame32 *frame) {
     task_slots[child_slot].ppid_slot = (uint32_t)current_task_idx;
     task_slots[child_slot].brk = task_slots[current_task_idx].brk;
 
+    // Per-process paging: child gets its own space with a deep copy of the
+    // parent's user pages
+    task_slots[child_slot].pd = paging_create_address_space_32();
+    if (!task_slots[child_slot].pd ||
+        paging_clone_user_pages_32(task_slots[child_slot].pd, task_slots[current_task_idx].pd) < 0) {
+        if (task_slots[child_slot].pd) paging_free_user_space_32(task_slots[child_slot].pd);
+        task_slots[child_slot].active = 0;
+        return -1;
+    }
+
     // Phase 60: inherit credentials, umask and cwd
     task_slots[child_slot].uid = task_slots[current_task_idx].uid;
     task_slots[child_slot].gid = task_slots[current_task_idx].gid;
@@ -2294,6 +2407,12 @@ static int32_t sys_execve_32(InterruptFrame32 *frame, uint32_t path_ptr) {
         ehdr->e_type != ET_EXEC)
         return -1;
 
+    // Fresh per-process address space
+    uint32_t *task_pd = paging_create_address_space_32();
+    if (!task_pd) {
+        serial_print("[elf] out of frames for address space\n");
+        return -1;
+    }
     // Map PT_LOAD segments (replaces current process image)
     Elf32_Phdr *phdr = (Elf32_Phdr *)(elf_load_buf_32 + ehdr->e_phoff);
     for (int i = 0; i < ehdr->e_phnum; i++) {
@@ -2317,18 +2436,25 @@ static int32_t sys_execve_32(InterruptFrame32 *frame, uint32_t path_ptr) {
                         ((uint8_t *)f)[b] = elf_load_buf_32[foff];
                 }
             }
-            paging_map_4k_32(kernel_page_dir, va, f, PAGE_USER_32);
+            paging_map_4k_32(task_pd, va, f, PAGE_USER_32 | PAGE_WRITABLE_32);
         }
     }
 
-    // Remap user stack
+    // Fresh user stack in the new space
     for (uint32_t i = 0; i < USER_STACK_SIZE_32; i += PAGE_SIZE) {
         uint32_t f = frame_alloc_32();
         if (!f) return -1;
-        paging_map_4k_32(kernel_page_dir, USER_STACK_TOP_32 - USER_STACK_SIZE_32 + i,
-                         f, PAGE_USER_32);
+        paging_map_4k_32(task_pd, USER_STACK_TOP_32 - USER_STACK_SIZE_32 + i,
+                         f, PAGE_USER_32 | PAGE_WRITABLE_32);
     }
-    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax", "memory");
+    // Switch to the new space, then free the old (never free what CR3 points at)
+    {
+        uint32_t *old_pd = task_slots[current_task_idx].pd;
+        task_slots[current_task_idx].pd = task_pd;
+        task_switch_cr3_32(current_task_idx);
+        if (old_pd && old_pd != paging_get_kernel_pd_ptr())
+            paging_free_user_space_32(old_pd);
+    }
 
     // Reset fd table (keep 0/1/2)
     for (int i = 3; i < FD_MAX; i++)
@@ -4141,16 +4267,20 @@ void kernel_main(void) {
     // ----- Phase 45: User shell boot -----
     g_elf_exec_fn = kernel_elf_exec_32;
     {
-        // Phase 53: userland init blocked on per-process address spaces
-        // (see x64) — kernel respawner task provides PID-1 semantics.
-        const void *vsh = vfs_find_file("/bin/vsh32");
+        // Phase 53 + per-process paging: boot the real user-space init.
+        const char *user_boot = vfs_find_file("/sbin/init32") ? "/sbin/init32"
+                                                              : "/bin/vsh32";
+        const void *vsh = vfs_find_file(user_boot);
         if (vsh) {
-            serial_print("[phase53] launching /bin/vsh32...\n");
+            serial_print("[phase53] launching ");
+            serial_print(user_boot);
+            serial_print("...\n");
             // 4-tick quantum: vsh busy-polls stdin (no blocking reads yet);
             // long slices just steal wall time from the GUI render loop
-            int elf_slot = elf_exec_32("/bin/vsh32", 4);
+            int elf_slot = elf_exec_32(user_boot, 4);
             if (elf_slot >= 0) {
-                g_shell_pid = task_slots[elf_slot].pid;
+                if (user_boot[1] == 'b')  // fallback direct-vsh only
+                    g_shell_pid = task_slots[elf_slot].pid;
                 serial_print("[phase45] user shell task running\n");
             } else {
                 serial_print("[phase45] /bin/vsh32 load failed\n");

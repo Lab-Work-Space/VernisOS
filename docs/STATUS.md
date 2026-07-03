@@ -492,20 +492,31 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ vernislibc wrappers: socket(), bind(), listen(), accept(), connect(), send(), recv()
       └─ /bin/nc (netcat) user-space tool
 
-    Phase 53: Init / Respawner ⚠️ PARTIAL (2026-07-03) — kernel-side init ทำงานแล้ว
+    Phase 62: Per-Process Address Spaces ✅ DONE (2026-07-03)
+      └─ Frame free-list (2048 slots) เพิ่มบน bump allocator — exec/exit/kill
+        คืน frame กลับ pool (bump ล้วนจะหมด pool หลัง respawn ไม่กี่รอบ)
+      └─ paging_create_address_space: clone chain 0-1GB จริง (PML4→PDPT→PD บน x64,
+        page-dir บน x86) — kernel identity/framebuffer PDE แชร์ by value,
+        user range (0x10000000-0x40000000) เริ่มว่าง
+      └─ TaskSlot.pml4 (x64) / .pd (x86); CR3 โหลดตอน context switch (timer),
+        exit, execve, kill — kernel task ใช้ kernel space
+      └─ elf_exec/execve: build image ใน space ใหม่แล้วค่อย switch + free space เก่า
+        (ไม่ free สิ่งที่ CR3 ยังชี้อยู่); fork: deep-copy user pages ทั้งหมด
+      └─ demand paging / sbrk / mmap map เข้า space ของ task ปัจจุบัน
+      └─ ทดสอบ: kill→respawn 8 รอบไม่มี frame exhaustion (freelist recycle),
+        init+shell อยู่พร้อมกันได้ทั้ง x86+x64, TCP 11/11, DHCP/DNS/GUI ปกติ
+      └─ ยังไม่ทำ: copy-on-write (fork copy เต็มทุกหน้า), guard page, ASLR
+
+    Phase 53: Init / Respawner ✅ DONE (2026-07-03) — เปิด userland init จริงได้แล้ว
+      └─ ปลดล็อกโดย Phase 62 (per-process address spaces): /sbin/init{32,64}
+        (fork+execve+waitpid respawn loop) boot เป็น task แรกแล้ว — verified ทั้ง
+        2 arch: init + shell อยู่พร้อมกัน, kill shell → init reap+respawn จริง
+      └─ kernel respawner ("kinit") ยังอยู่เป็น fallback เมื่อไม่มี /sbin/init
       └─ SYS_YIELD(86) + userlib yield(): สละ quantum ที่เหลือ
       └─ SIGKILL/SIGTERM ฆ่า task จริงแล้ว: SYS_KILL deactivate slot +
         scheduler_kill_process (exit code 137 — ไม่ใช่ -1 ที่ชนกับ "ยังไม่จบ")
       └─ Kernel respawner task ("kinit"): เฝ้า shell ผ่าน scheduler exit code,
         relaunch /bin/vsh ผ่าน elf_exec — ทดสอบ kill→respawn ซ้ำๆ ทั้ง x86+x64
-      └─ userlib/init.c (userland PID-1 จริง) เขียนเสร็จ + build เข้า image เป็น
-        /sbin/init{32,64} แล้ว แต่ยังเปิดใช้ไม่ได้:
-        └─ BLOCKER: ทุก user process แชร์ address space เดียว (kernel_pml4/page_dir)
-          — execve ที่สำเร็จใน child จะเขียนทับโค้ด parent ที่ 0x10000000 → parent พัง
-        └─ ต้องมี per-process page tables + CR3 switch ใน context switch ก่อน
-      └─ Bug ที่เจอระหว่างทำ (แก้แล้ว): x86 user stack + ELF segments map โดย
-        ไม่มี PAGE_WRITABLE → vsh32 page fault ตั้งแต่ push แรก — vsh32 ไม่เคย
-        รันได้เลยบน x86 จนวันนี้
       └─ ยังไม่ทำ: inittab, SIGCHLD, shutdown coordination
 
     Phase 54: Interrupt-Driven I/O ⬜ PLANNED
