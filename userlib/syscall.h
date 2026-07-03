@@ -20,6 +20,13 @@
 #define SYS_FORK      73
 #define SYS_EXECVE    74
 #define SYS_SBRK      75
+#define SYS_SETUID    79
+#define SYS_SETGID    80
+#define SYS_GETUID    81
+#define SYS_GETGID    82
+#define SYS_CHDIR     83
+#define SYS_GETCWD    84
+#define SYS_UMASK     85
 
 /* ---- Architecture-specific syscall inline ---- */
 
@@ -105,6 +112,34 @@ static inline int waitpid(int pid) {
 
 static inline int kill(int pid, int sig) {
     return (int)_syscall3(SYS_KILL, (size_t)pid, (size_t)sig, 0);
+}
+
+static inline int setuid(int uid) {
+    return (int)_syscall3(SYS_SETUID, (size_t)uid, 0, 0);
+}
+
+static inline int setgid(int gid) {
+    return (int)_syscall3(SYS_SETGID, (size_t)gid, 0, 0);
+}
+
+static inline int getuid(void) {
+    return (int)_syscall3(SYS_GETUID, 0, 0, 0);
+}
+
+static inline int getgid(void) {
+    return (int)_syscall3(SYS_GETGID, 0, 0, 0);
+}
+
+static inline int chdir(const char *path) {
+    return (int)_syscall3(SYS_CHDIR, (size_t)path, 0, 0);
+}
+
+static inline int getcwd_sys(char *buf, size_t size) {
+    return (int)_syscall3(SYS_GETCWD, (size_t)buf, size, 0);
+}
+
+static inline int umask_sys(int mask) {
+    return (int)_syscall3(SYS_UMASK, (size_t)mask, 0, 0);
 }
 
 static inline void *sbrk(int increment) {

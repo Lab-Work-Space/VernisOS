@@ -149,7 +149,9 @@ VernisFS on disk (sector-based, 32 files max)
 
 The Intel E1000 (82540EM) driver lives in each arch's kernel file (`kernel/arch/x86_64/kernel_x64.c` and `kernel/arch/x86/kernel_x86.c`) as static functions (`e1000_send()`, `e1000_recv()`). The timer IRQ (240Hz) calls `net_rx_poll()`, which drains the RX ring into `net_dispatch_frame()` — ARP, ICMP echo replies (ping waits on `g_icmp_echo_seq`), and TCP (`tcp_receive_packet()`).
 
-TCP (`kernel/net/tcp.c`) is arch-agnostic: the kernel registers `net_tcp_ip_output()` via `tcp_set_output()` at boot. That transmit path is non-blocking — on ARP cache miss it drops the segment and fires an ARP request; handshake retransmission (`tcp_tick()`, also timer-IRQ) covers the loss. Never call the blocking `net_arp_resolve()` from IRQ context. TCP covers handshake, data (`tcp_send`/`tcp_recv`, 1KB rx buffer per socket), teardown, and RFC 793 checksum; still missing: sliding window, data retransmission, out-of-order reassembly, UDP/DHCP/DNS.
+TCP (`kernel/net/tcp.c`) is arch-agnostic: the kernel registers `net_tcp_ip_output()` via `tcp_set_output()` at boot. That transmit path is non-blocking — on ARP cache miss it drops the segment and fires an ARP request; handshake retransmission (`tcp_tick()`, also timer-IRQ) covers the loss. Never call the blocking `net_arp_resolve()` from IRQ context. TCP covers handshake, data (`tcp_send`/`tcp_recv`, 1KB rx buffer per socket), teardown, and RFC 793 checksum; still missing: sliding window, data retransmission, out-of-order reassembly.
+
+UDP (`kernel/net/udp.c`, same arch-agnostic pattern) provides 8 sockets with `udp_bind/udp_sendto/udp_recvfrom`; the same file hosts the DHCP client (full DORA; `dhcp` CLI applies the lease via `kernel_net_apply_config()`) and DNS A-record resolver (`nslookup` CLI; server defaults to slirp's 10.0.2.3). UDP's IP transmit supports src 0.0.0.0 and 255.255.255.255 broadcast for DHCP. CLI: `udpbind/udpsend/udprecv/udpclose`, `dhcp`, `nslookup`.
 
 Serial console: the timer IRQ also polls COM1 RX into the kernel CLI keyboard buffer, so `-serial stdio` (plus `-vga none` to force VGA-text CLI mode instead of the GUI) drives the shell — this is how the integration tests interact with the OS. CLI test commands: `tcphandshake connect <ip> <port>`, `tcpsend`, `tcprecv`, `tcpstat`, `tcpclose`.
 
@@ -187,7 +189,7 @@ All intermediate files go under `make/` (not committed):
 | Subsystem | Location | Status |
 |-----------|----------|--------|
 | TCP extras | `kernel/net/tcp.c` | Core works (handshake/data/close, checksum); no sliding window, data retransmit, OOO reassembly |
-| UDP / DHCP / DNS | — | Not implemented |
+| Socket fd model | — | UDP/TCP not exposed as file descriptors yet (Phase 52) |
 | FAT32 driver | `kernel/fs/fat32.c` | 3-line stub — ignore STATUS.md claim |
 | ext2 driver | `kernel/fs/ext2.c` | 3-line stub |
 | NTFS driver | `kernel/fs/ntfs.c` | 3-line stub |

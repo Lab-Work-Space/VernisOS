@@ -114,6 +114,8 @@ STAGE3_BIN = make/boot/CISC/stage3.bin
 
 KERNEL_X86_TCP = make/kernel/arch/x86/tcp.o
 KERNEL_X64_TCP = make/kernel/arch/x86_64/tcp.o
+KERNEL_X86_UDP = make/kernel/arch/x86/udp.o
+KERNEL_X64_UDP = make/kernel/arch/x86_64/udp.o
 # Add tcp.o to kernel object lists
 KERNEL_X86_OBJ := make/kernel/arch/x86/kernel_x86.o \
 	make/kernel/arch/x86/rust_shims.o \
@@ -138,6 +140,7 @@ KERNEL_X86_OBJ := make/kernel/arch/x86/kernel_x86.o \
 	make/kernel/arch/x86/klog.o \
 make/kernel/arch/x86/bcache.o \
 	make/kernel/arch/x86/tcp.o \
+	make/kernel/arch/x86/udp.o \
 make/kernel/arch/x86/fat32.o \
 	make/kernel/arch/x86/ext2.o \
 	make/kernel/arch/x86/ntfs.o
@@ -168,7 +171,7 @@ KERNEL_X64_BCACHE = make/kernel/arch/x86_64/bcache.o
 KERNEL_X64_FAT32 = make/kernel/arch/x86_64/fat32.o
 KERNEL_X64_EXT2 = make/kernel/arch/x86_64/ext2.o
 KERNEL_X64_NTFS = make/kernel/arch/x86_64/ntfs.o
-KERNEL_X64_OBJ  = make/kernel/arch/x86_64/kernel_x64.o $(KERNEL_X64_SHIM) $(KERNEL_X64_INTR) $(KERNEL_X64_SYSC) $(KERNEL_X64_IPC) $(KERNEL_X64_MOD) $(KERNEL_X64_DLIB) $(KERNEL_X64_SAND) $(KERNEL_X64_CLI) $(KERNEL_X64_AI) $(KERNEL_X64_AIE) $(KERNEL_X64_ACPI) $(KERNEL_X64_POL) $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) $(KERNEL_X64_FAT32) $(KERNEL_X64_EXT2) $(KERNEL_X64_NTFS)
+KERNEL_X64_OBJ  = make/kernel/arch/x86_64/kernel_x64.o $(KERNEL_X64_SHIM) $(KERNEL_X64_INTR) $(KERNEL_X64_SYSC) $(KERNEL_X64_IPC) $(KERNEL_X64_MOD) $(KERNEL_X64_DLIB) $(KERNEL_X64_SAND) $(KERNEL_X64_CLI) $(KERNEL_X64_AI) $(KERNEL_X64_AIE) $(KERNEL_X64_ACPI) $(KERNEL_X64_POL) $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) $(KERNEL_X64_UDP) $(KERNEL_X64_FAT32) $(KERNEL_X64_EXT2) $(KERNEL_X64_NTFS)
 
 KERNEL_X86_ELF = make/kernel/arch/x86/kernel_x86.elf
 KERNEL_X64_ELF = make/kernel/arch/x86_64/kernel_x64.elf
@@ -612,7 +615,7 @@ $(KERNEL_X64_KLOG): kernel/log/klog.c include/klog.h | prepare
 $(KERNEL_X64_BIN): $(KERNEL_X64_SRC) $(KERNEL_X64_LD) $(KERNEL_X64_SHIM) \
 	   $(KERNEL_X64_INTR) $(KERNEL_X64_SYSC) $(KERNEL_X64_IPC) \
 	   $(KERNEL_X64_MOD) $(KERNEL_X64_DLIB) $(KERNEL_X64_SAND) $(KERNEL_X64_CLI) $(KERNEL_X64_AI) $(KERNEL_X64_AIE) $(KERNEL_X64_ACPI) $(KERNEL_X64_POL) \
-	   $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) \
+	   $(KERNEL_X64_SHA) $(KERNEL_X64_VFS) $(KERNEL_X64_KVFS) $(KERNEL_X64_UDB) $(KERNEL_X64_ENF) $(KERNEL_X64_TST) $(KERNEL_X64_AUD) $(KERNEL_X64_KLOG) $(KERNEL_X64_BCACHE) $(KERNEL_X64_TCP) $(KERNEL_X64_UDP) \
 	   $(KERNEL_X64_FAT32) $(KERNEL_X64_EXT2) $(KERNEL_X64_NTFS) \
 	   $(VERNISOS_LIB_X64) | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $(KERNEL_X64_SRC) -o make/kernel/arch/x86_64/kernel_x64.o
@@ -623,19 +626,16 @@ $(KERNEL_X64_BIN): $(KERNEL_X64_SRC) $(KERNEL_X64_LD) $(KERNEL_X64_SHIM) \
 # ==== Run/Debug ====
 run32: $(UNIVERSAL_IMG)
 	qemu-system-i386 -drive format=raw,file=$(UNIVERSAL_IMG) \
-	    -serial stdio \
 	    -device usb-ehci -device usb-tablet
 
 run64: $(UNIVERSAL_IMG)
 	qemu-system-x86_64 -drive format=raw,file=$(UNIVERSAL_IMG) \
-	    -serial stdio \
 	    -device usb-ehci -device usb-tablet
 
 # Run x64 with AI bridge on TCP port 4444
 # Start Python listener first: python3 ai/ai_listener.py --port 4444
 run64-ai: $(UNIVERSAL_IMG)
 	qemu-system-x86_64 -drive format=raw,file=$(UNIVERSAL_IMG) \
-	    -serial stdio \
 	    -chardev socket,id=ai,host=localhost,port=4444,server=off \
 	    -device isa-serial,chardev=ai,index=1
 
@@ -782,5 +782,12 @@ $(KERNEL_X86_TCP): kernel/net/tcp.c include/tcp.h | prepare
 	$(CC_X86) $(CFLAGS_X86) $(VERNISOS_INC) -c $< -o $@
 
 $(KERNEL_X64_TCP): kernel/net/tcp.c include/tcp.h | prepare
+	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
+
+# ==== Compile udp.c (Phase 50/51) ====
+$(KERNEL_X86_UDP): kernel/net/udp.c include/udp.h | prepare
+	$(CC_X86) $(CFLAGS_X86) $(VERNISOS_INC) -c $< -o $@
+
+$(KERNEL_X64_UDP): kernel/net/udp.c include/udp.h | prepare
 	$(CC_X64) $(CFLAGS_X64) $(VERNISOS_INC) -c $< -o $@
 

@@ -2,6 +2,7 @@
 
 // --- TCP CLI command implementations (inlined, single-file) ---
 #include "tcp.h"
+#include "udp.h"
 
 // --- Utility: String Functions (must be before TCP CLI commands) ---
 static int cli_strcmp(const char *a, const char *b) {
@@ -109,6 +110,123 @@ static int cli_cmd_tcprecv(CliSession *session, const ParsedCommand *cmd) {
     }
     buf[n] = 0;
     cli_printf("%s", buf);
+    return 0;
+}
+
+
+static void cli_print_ip4(uint32_t ip) {
+    cli_printf("%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+               (ip >> 8) & 0xFF, ip & 0xFF);
+}
+
+static int cli_cmd_udpbind(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 2) {
+        cli_printf("Usage: udpbind <port>\n");
+        return 1;
+    }
+    int sock = udp_bind((uint16_t)simple_atoi(cmd->argv[1]));
+    if (sock < 0) cli_printf("udpbind: no socket / port taken\n");
+    else cli_printf("sock %d bound to port %u\n", sock, udp_local_port(sock));
+    return sock < 0 ? 1 : 0;
+}
+
+static int cli_cmd_udpsend(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 4) {
+        cli_printf("Usage: udpsend <ip> <port> <text...>\n");
+        return 1;
+    }
+    unsigned a, b, c, d;
+    if (cli_parse_ip(cmd->argv[1], &a, &b, &c, &d) != 4) {
+        cli_printf("Invalid IP\n");
+        return 1;
+    }
+    uint32_t ip = (a << 24) | (b << 16) | (c << 8) | d;
+    uint16_t port = (uint16_t)simple_atoi(cmd->argv[2]);
+    char buf[256];
+    int len = 0;
+    for (int i = 3; i < cmd->argc && len < (int)sizeof(buf) - 1; i++) {
+        if (i > 3) buf[len++] = ' ';
+        for (const char *p = cmd->argv[i]; *p && len < (int)sizeof(buf) - 1; p++)
+            buf[len++] = *p;
+    }
+    buf[len++] = '\n';
+    int sock = udp_bind(0); // ephemeral
+    if (sock < 0) { cli_printf("udpsend: no socket\n"); return 1; }
+    int n = udp_sendto(sock, ip, port, buf, len);
+    udp_close(sock);
+    if (n < 0) cli_printf("udpsend: send failed (ARP pending? retry)\n");
+    else cli_printf("sent %d bytes\n", len);
+    return n < 0 ? 1 : 0;
+}
+
+static int cli_cmd_udprecv(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 2) {
+        cli_printf("Usage: udprecv <sock>\n");
+        return 1;
+    }
+    char buf[257];
+    uint32_t sip = 0; uint16_t sport = 0;
+    int n = udp_recvfrom(simple_atoi(cmd->argv[1]), buf, 256, &sip, &sport);
+    if (n < 0) { cli_printf("udprecv: bad socket\n"); return 1; }
+    if (n == 0) { cli_printf("(no datagram)\n"); return 0; }
+    buf[n] = 0;
+    cli_printf("from ");
+    cli_print_ip4(sip);
+    cli_printf(":%u — %s", sport, buf);
+    return 0;
+}
+
+static int cli_cmd_udpclose(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 2) {
+        cli_printf("Usage: udpclose <sock>\n");
+        return 1;
+    }
+    if (udp_close(simple_atoi(cmd->argv[1])) < 0) {
+        cli_printf("udpclose: bad socket\n");
+        return 1;
+    }
+    cli_printf("closed\n");
+    return 0;
+}
+
+static int cli_cmd_dhcp(CliSession *session, const ParsedCommand *cmd) {
+    (void)session; (void)cmd;
+    extern void kernel_net_apply_config(uint32_t ip4, uint32_t gw4, uint32_t dns4);
+    uint32_t ip = 0, mask = 0, gw = 0, dns = 0;
+    cli_printf("DHCP: discovering...\n");
+    if (dhcp_run(&ip, &mask, &gw, &dns) != 0) {
+        cli_printf("DHCP failed (no server?)\n");
+        return 1;
+    }
+    kernel_net_apply_config(ip, gw, dns);
+    cli_printf("lease: ip ");   cli_print_ip4(ip);
+    cli_printf(" mask ");        cli_print_ip4(mask);
+    cli_printf(" gw ");          cli_print_ip4(gw);
+    cli_printf(" dns ");         cli_print_ip4(dns);
+    cli_printf("\n");
+    return 0;
+}
+
+static int cli_cmd_nslookup(CliSession *session, const ParsedCommand *cmd) {
+    (void)session;
+    if (cmd->argc < 2) {
+        cli_printf("Usage: nslookup <hostname>\n");
+        return 1;
+    }
+    uint32_t ip = 0;
+    if (dns_resolve(cmd->argv[1], &ip) != 0) {
+        cli_printf("nslookup: resolution failed (dns server ");
+        cli_print_ip4(dns_get_server());
+        cli_printf(")\n");
+        return 1;
+    }
+    cli_printf("%s -> ", cmd->argv[1]);
+    cli_print_ip4(ip);
+    cli_printf("\n");
     return 0;
 }
 
@@ -439,6 +557,12 @@ static const CliBuiltinCommand BUILTIN_COMMANDS[] = {
     { "tcprecv",  "Read data from TCP socket", cli_cmd_tcprecv, CLI_PRIV_USER  },
     { "tcpclose", "Close TCP socket",         cli_cmd_tcpclose, CLI_PRIV_USER  },
     { "winmove",  "Move focused window (GUI)", cli_cmd_winmove, CLI_PRIV_USER  },
+    { "udpbind",  "Bind UDP socket",          cli_cmd_udpbind,  CLI_PRIV_USER  },
+    { "udpsend",  "Send UDP datagram",        cli_cmd_udpsend,  CLI_PRIV_USER  },
+    { "udprecv",  "Receive UDP datagram",     cli_cmd_udprecv,  CLI_PRIV_USER  },
+    { "udpclose", "Close UDP socket",         cli_cmd_udpclose, CLI_PRIV_USER  },
+    { "dhcp",     "Configure IP via DHCP",    cli_cmd_dhcp,     CLI_PRIV_USER  },
+    { "nslookup", "Resolve hostname (DNS)",   cli_cmd_nslookup, CLI_PRIV_USER  },
 };
 
 // TCP status command implementation now inlined above
@@ -629,6 +753,13 @@ void cli_printf(const char *fmt, ...) {
                     int val = va_arg(args, int);
                     if (width > 0) cli_print_field_d(val, width, left);
                     else cli_write_int_dec(val);
+                    break;
+                }
+                case 'u': {
+                    // Unsigned decimal (values here are small: ports, octets)
+                    uint32_t val = va_arg(args, uint32_t);
+                    if (width > 0) cli_print_field_d((int)val, width, left);
+                    else cli_write_int_dec((int)val);
                     break;
                 }
                 case 'x': {

@@ -34,7 +34,7 @@ pub unsafe extern "C" fn mouse_init(screen_w: u32, screen_h: u32) {
 /// dx: byte 1 (X movement, sign-extended)
 /// dy: byte 2 (Y movement, sign-extended)
 #[no_mangle]
-pub unsafe extern "C" fn mouse_handle_packet(flags: u8, dx: i8, dy: i8) {
+pub unsafe extern "C" fn mouse_handle_packet(flags: u8, dx: i32, dy: i32) {
     if !MOUSE.initialized {
         return;
     }
@@ -43,8 +43,8 @@ pub unsafe extern "C" fn mouse_handle_packet(flags: u8, dx: i8, dy: i8) {
     MOUSE.buttons = flags & 0x07;
 
     // Update position (PS/2 Y is inverted: positive = up)
-    MOUSE.x += dx as i32;
-    MOUSE.y -= dy as i32; // invert Y for screen coordinates
+    MOUSE.x += dx;
+    MOUSE.y -= dy; // invert Y for screen coordinates
 
     // Clamp to screen bounds
     if MOUSE.x < 0 {

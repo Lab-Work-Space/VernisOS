@@ -307,7 +307,7 @@ pub unsafe extern "C" fn gui_handle_key(scancode: u8, _pressed: u8) {
 /// This processes the raw PS/2 packet, updates mouse position,
 /// and generates high-level events.
 #[no_mangle]
-pub unsafe extern "C" fn gui_handle_mouse(flags: u8, dx: i8, dy: i8) {
+pub unsafe extern "C" fn gui_handle_mouse(flags: u8, dx: i32, dy: i32) {
     // Update mouse position via the mouse module
     mouse::mouse_handle_packet(flags, dx, dy);
 

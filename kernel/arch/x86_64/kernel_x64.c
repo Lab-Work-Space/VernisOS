@@ -13,6 +13,7 @@
 #include "klog.h"
 
 #include "tcp.h"
+#include "udp.h"
 
 // =============================================================================
 // VGA Text Mode
@@ -44,7 +45,7 @@ extern void console_clear_to_eol(uint32_t row, uint32_t col);
 
 // Rust mouse FFI
 extern void mouse_init(uint32_t screen_w, uint32_t screen_h);
-extern void mouse_handle_packet(uint8_t flags, int8_t dx, int8_t dy);
+extern void mouse_handle_packet(uint8_t flags, int32_t dx, int32_t dy);
 extern int32_t mouse_get_x(void);
 extern int32_t mouse_get_y(void);
 extern uint8_t mouse_get_buttons(void);
@@ -53,7 +54,7 @@ extern uint8_t mouse_get_buttons(void);
 extern void gui_init(uint32_t screen_w, uint32_t screen_h);
 extern void gui_main_loop_tick(void);
 extern void gui_handle_key(uint8_t scancode, uint8_t pressed);
-extern void gui_handle_mouse(uint8_t flags, int8_t dx, int8_t dy);
+extern void gui_handle_mouse(uint8_t flags, int32_t dx, int32_t dy);
 
 #define VGA_COLOR_BLACK         0
 #define VGA_COLOR_BLUE          1
@@ -682,6 +683,13 @@ static void pic_send_eoi(uint8_t irq) {
 #define SYS_MUNMAP    77
 
 #define SYS_SYNC      78    // Phase 48: Flush block cache
+#define SYS_SETUID    79    // Phase 60: multiuser credentials
+#define SYS_SETGID    80
+#define SYS_GETUID    81
+#define SYS_GETGID    82
+#define SYS_CHDIR     83
+#define SYS_GETCWD    84
+#define SYS_UMASK     85
 
 #define USER_VADDR_MIN_64 0x10000000ULL
 #define USER_VADDR_MAX_64 0x40000000ULL
@@ -961,9 +969,10 @@ static void mouse_irq_handler(void) {
         mouse_packet[2] = data;
         mouse_cycle = 0;
         {
-            // Sign-extend dx and dy
-            int8_t dx = (int8_t)mouse_packet[1];
-            int8_t dy = (int8_t)mouse_packet[2];
+            // PS/2 movement is 9-bit two's complement: the sign bits live in
+            // the flags byte (bit 4 = X, bit 5 = Y), not in the data bytes
+            int32_t dx = (int32_t)mouse_packet[1] - ((mouse_packet[0] & 0x10) ? 256 : 0);
+            int32_t dy = (int32_t)mouse_packet[2] - ((mouse_packet[0] & 0x20) ? 256 : 0);
 
             // Check overflow bits — discard if overflow
             if (!(mouse_packet[0] & 0xC0)) {
@@ -1289,6 +1298,10 @@ typedef struct {
     uint64_t brk;                  // Phase 43: program break for sbrk
     VmaEntry vma_list[VMA_MAX_PER_TASK]; // Phase 46: mmap regions
     uint64_t mmap_next;            // Phase 46: next mmap virtual address
+    uint16_t uid;                  // Phase 60: user/group credentials
+    uint16_t gid;
+    uint16_t file_umask;           // Phase 60: file-creation mask
+    char     cwd[SYS_IO_PATH_MAX]; // Phase 60: current working directory
     uint8_t  stack[TASK_STACK_SIZE] __attribute__((aligned(16)));
 } TaskSlot;
 
@@ -1558,6 +1571,12 @@ static int64_t sys_fork(InterruptFrame *frame) {
 
     // Copy fd table
     fd_copy(child->fd_table, parent->fd_table);
+
+    // Phase 60: inherit credentials, umask and cwd
+    child->uid = parent->uid;
+    child->gid = parent->gid;
+    child->file_umask = parent->file_umask;
+    for (int i = 0; i < (int)SYS_IO_PATH_MAX; i++) child->cwd[i] = parent->cwd[i];
 
     // Copy VMA list (Phase 46)
     for (int i = 0; i < VMA_MAX_PER_TASK; i++)
@@ -1994,6 +2013,54 @@ uint64_t interrupt_dispatch(InterruptFrame *frame) {
         } else if (frame->rax == SYS_SYNC) {
             // Phase 48: sync() -> 0 or -1
             frame->rax = (uint64_t)bcache_sync();
+        } else if (frame->rax == SYS_SETUID || frame->rax == SYS_SETGID) {
+            // Phase 60: only root may change credentials (no-op self-set ok)
+            TaskSlot *t = (current_task_idx >= 0) ? &task_slots[current_task_idx] : 0;
+            uint16_t v = (uint16_t)frame->rbx;
+            if (!t) { frame->rax = (uint64_t)-1; }
+            else if (frame->rax == SYS_SETUID) {
+                if (t->uid == 0 || v == t->uid) { t->uid = v; frame->rax = 0; }
+                else frame->rax = (uint64_t)-1;
+            } else {
+                if (t->uid == 0 || v == t->gid) { t->gid = v; frame->rax = 0; }
+                else frame->rax = (uint64_t)-1;
+            }
+        } else if (frame->rax == SYS_GETUID) {
+            frame->rax = (current_task_idx >= 0) ? task_slots[current_task_idx].uid : 0;
+        } else if (frame->rax == SYS_GETGID) {
+            frame->rax = (current_task_idx >= 0) ? task_slots[current_task_idx].gid : 0;
+        } else if (frame->rax == SYS_CHDIR) {
+            // Phase 60: chdir(path_ptr) — path must exist in the VFS (or be /)
+            TaskSlot *t = (current_task_idx >= 0) ? &task_slots[current_task_idx] : 0;
+            char path[SYS_IO_PATH_MAX];
+            if (t && copy_user_path_64(path, frame->rbx) == 0 && path[0] == '/' &&
+                (path[1] == '\0' || kfs_find_file(path) != 0)) {
+                for (int i = 0; i < (int)SYS_IO_PATH_MAX; i++) t->cwd[i] = path[i];
+                frame->rax = 0;
+            } else {
+                frame->rax = (uint64_t)-1;
+            }
+        } else if (frame->rax == SYS_GETCWD) {
+            // Phase 60: getcwd(buf_ptr, size) -> length or -1
+            TaskSlot *t = (current_task_idx >= 0) ? &task_slots[current_task_idx] : 0;
+            uint64_t buf = frame->rbx, size = frame->rcx;
+            uint64_t len = 0;
+            if (t) while (len < SYS_IO_PATH_MAX && t->cwd[len]) len++;
+            if (t && size > len && user_ptr_range_valid_64(buf, len + 1)) {
+                for (uint64_t i = 0; i <= len; i++)
+                    *(volatile char *)(buf + i) = t->cwd[i];
+                frame->rax = len;
+            } else {
+                frame->rax = (uint64_t)-1;
+            }
+        } else if (frame->rax == SYS_UMASK) {
+            // Phase 60: umask(mask) -> previous mask
+            TaskSlot *t = (current_task_idx >= 0) ? &task_slots[current_task_idx] : 0;
+            if (t) {
+                uint16_t old = t->file_umask;
+                t->file_umask = (uint16_t)(frame->rbx & 0777);
+                frame->rax = old;
+            } else frame->rax = (uint64_t)-1;
         } else {
             frame->rax = c_syscall_handler(frame->rax, frame->rbx,
                                             frame->rcx, frame->rdx, 0);
@@ -2433,6 +2500,11 @@ static void task_register_main(uint32_t pid, uint16_t ticks) {
     task_slots[0].rsp             = 0;           // saved on first preemption
     task_slots[0].ticks_remaining = ticks;
     task_slots[0].ticks_total     = ticks;
+    task_slots[0].uid             = 0;           // Phase 60: root creds, / cwd
+    task_slots[0].gid             = 0;
+    task_slots[0].file_umask      = 022;
+    task_slots[0].cwd[0]          = '/';
+    task_slots[0].cwd[1]          = '\0';
     current_task_idx = 0;
 }
 
@@ -2556,6 +2628,11 @@ static int elf_exec(const char *path, uint16_t ticks) {
     task_slots[slot].ticks_total     = ticks;
     task_slots[slot].brk             = 0;
     fd_table_init(task_slots[slot].fd_table);  // Phase 41: init fd 0/1/2
+    task_slots[slot].uid = 0;                  // Phase 60: root creds, / cwd
+    task_slots[slot].gid = 0;
+    task_slots[slot].file_umask = 022;
+    task_slots[slot].cwd[0] = '/';
+    task_slots[slot].cwd[1] = '\0';
     vma_init(task_slots[slot].vma_list);       // Phase 46: init VMAs
     task_slots[slot].mmap_next       = 0;
 
@@ -4075,6 +4152,12 @@ static void net_dispatch_frame(uint8_t *buf, int n) {
         uint32_t dip = ((uint32_t)ip->dst[0] << 24) | ((uint32_t)ip->dst[1] << 16) |
                        ((uint32_t)ip->dst[2] << 8)  | ip->dst[3];
         tcp_receive_packet(sip, dip, buf + 14 + ihl, tot - ihl);
+    } else if (ip->protocol == 17) {
+        uint32_t sip = ((uint32_t)ip->src[0] << 24) | ((uint32_t)ip->src[1] << 16) |
+                       ((uint32_t)ip->src[2] << 8)  | ip->src[3];
+        uint32_t dip = ((uint32_t)ip->dst[0] << 24) | ((uint32_t)ip->dst[1] << 16) |
+                       ((uint32_t)ip->dst[2] << 8)  | ip->dst[3];
+        udp_receive_packet(sip, dip, buf + 14 + ihl, tot - ihl);
     }
 }
 
@@ -4116,6 +4199,54 @@ static int net_tcp_ip_output(uint32_t dst_ip, const void *seg, int len) {
     ip->checksum = ip_checksum(ip, 20);
     mcpy(pkt + 14 + 20, seg, len);
     return e1000_send(pkt, (uint16_t)(14 + 20 + len));
+}
+
+
+// Phase 50: UDP transmit for udp.c. src_ip 0 allowed (DHCP pre-config),
+// dst 0xFFFFFFFF broadcasts without ARP. Non-blocking like the TCP path.
+static int net_udp_ip_output(uint32_t src_ip, uint32_t dst_ip, const void *seg, int len) {
+    static uint8_t upkt[14 + 20 + 1480];
+    if (!e1000_up || len < 0 || len > 1480) return -1;
+    uint8_t dip[4] = { (uint8_t)(dst_ip >> 24), (uint8_t)(dst_ip >> 16),
+                       (uint8_t)(dst_ip >> 8),  (uint8_t)dst_ip };
+    uint8_t mac[6];
+    if (dst_ip == 0xFFFFFFFFu) {
+        mcpy(mac, net_bcast_mac, 6);
+    } else {
+        const uint8_t *hop = (dip[0] == net_ip[0] && dip[1] == net_ip[1] &&
+                              dip[2] == net_ip[2]) ? dip : net_gw;
+        if (net_arp_lookup(hop, mac) < 0) {
+            net_send_arp_request(hop);
+            return -1;
+        }
+    }
+    EthHdr *eth = (EthHdr *)upkt;
+    Ipv4Hdr *ip = (Ipv4Hdr *)(upkt + 14);
+    mcpy(eth->dst, mac, 6); mcpy(eth->src, e1000_mac, 6);
+    eth->ethertype = htons(0x0800);
+    ip->ihl_ver = 0x45; ip->tos = 0; ip->total_len = htons((uint16_t)(20 + len));
+    ip->ident = htons((uint16_t)kernel_tick); ip->frag_off = 0;
+    ip->ttl = 64; ip->protocol = 17;
+    ip->checksum = 0;
+    ip->src[0] = (uint8_t)(src_ip >> 24); ip->src[1] = (uint8_t)(src_ip >> 16);
+    ip->src[2] = (uint8_t)(src_ip >> 8);  ip->src[3] = (uint8_t)src_ip;
+    mcpy(ip->dst, dip, 4);
+    ip->checksum = ip_checksum(ip, 20);
+    mcpy(upkt + 14 + 20, seg, len);
+    return e1000_send(upkt, (uint16_t)(14 + 20 + len));
+}
+
+// Phase 51: apply network configuration obtained via DHCP.
+void kernel_net_apply_config(uint32_t ip4, uint32_t gw4, uint32_t dns4) {
+    net_ip[0] = (uint8_t)(ip4 >> 24); net_ip[1] = (uint8_t)(ip4 >> 16);
+    net_ip[2] = (uint8_t)(ip4 >> 8);  net_ip[3] = (uint8_t)ip4;
+    if (gw4) {
+        net_gw[0] = (uint8_t)(gw4 >> 24); net_gw[1] = (uint8_t)(gw4 >> 16);
+        net_gw[2] = (uint8_t)(gw4 >> 8);  net_gw[3] = (uint8_t)gw4;
+    }
+    tcp_set_output(net_tcp_ip_output, ip4);
+    udp_set_local_ip(ip4);
+    if (dns4) dns_set_server(dns4);
 }
 
 // Exported for CLI
@@ -4545,6 +4676,11 @@ void kernel_main(void) {
                        ((uint32_t)net_ip[2] << 8)  | net_ip[3];
         tcp_set_output(net_tcp_ip_output, lip);
         serial_print("[phase49] TCP stack ready\n");
+        // Phase 50/51: UDP + default DNS (QEMU slirp resolver)
+        udp_init();
+        udp_set_output(net_udp_ip_output, lip);
+        dns_set_server(0x0A000203u); // 10.0.2.3 until DHCP overrides
+        serial_print("[phase50] UDP ready\n");
     }
 
     // Clear boot messages before starting interactive shell

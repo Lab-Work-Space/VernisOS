@@ -67,7 +67,7 @@
 | 13 | **AHCI / NVMe Driver** | ✅ AHCI+NVMe เชื่อม KFS — auto-detect priority: NVMe > AHCI > ATA PIO, pluggable disk I/O | สูง |
 | 14 | **USB Stack** | ❌ ยังไม่ทำ — ไม่มีโค้ด xHCI ใน repo (audit 2026-07-02) | สูง |
 | 15 | **Framebuffer GUI** | ✅ ทำงานแล้ว — auto-resolution (สูงสุด 1920×1080×32) + glassmorphism UI (Phase 61) | กลาง |
-| 16 | **Network Stack** | ⚠️ บางส่วน — E1000 + ARP + IPv4 + ICMP + TCP ทำงานแล้ว (Phase 49: handshake/send/recv/close ทดสอบ end-to-end กับ host จริงทั้ง x86+x64); UDP/DHCP/DNS ยังไม่มีโค้ด | สูง |
+| 16 | **Network Stack** | ✅ เกือบครบ — E1000 + ARP + IPv4 + ICMP + TCP + UDP + DHCP client + DNS resolver (Phase 49-51 ทดสอบ end-to-end กับ QEMU slirp + internet จริง); ที่เหลือ: TCP sliding window/data retransmit, socket-fd model | สูง |
 | 17 | **AC97 / Intel HDA Audio** | ❌ ยังไม่ทำ — ไม่มีโค้ด AC97/HDA ใน repo | กลาง |
 | 18 | **FAT32 Filesystem** | ❌ ยังไม่ทำ — kernel/fs/fat32.c เป็น stub 3 บรรทัด | กลาง |
 | 19 | **Multiuser (getty/login)** | ✅ ทำงานแล้ว — /sbin/getty + /bin/login, setuid/setgid, home dirs | สูง |
@@ -465,18 +465,25 @@ Phase 28: Shell Pipeline Support ✅ DONE
       └─ Verified end-to-end vs host echo server via QEMU slirp (10.0.2.2): 11/11 both arches
       └─ ยังไม่ทำ: sliding window, data retransmission, out-of-order reassembly, TIME_WAIT
 
-    Phase 50: UDP + Socket Layer ⬜ PLANNED
-      └─ UDP send/receive (stateless, checksum optional)
-      └─ Unified kernel socket API: socket/bind/listen/accept/connect/send/recv
-      └─ Port number management (ephemeral ports)
-      └─ Socket file descriptors (connect fd model to network)
+    Phase 50: UDP Layer ✅ DONE (2026-07-03)
+      └─ kernel/net/udp.c (arch-agnostic เหมือน tcp.c): 8 sockets, rx queue 4 datagrams/socket
+      └─ udp_bind (port 0 = ephemeral) / udp_sendto / udp_recvfrom / udp_close
+      └─ IP glue ทั้ง x86+x64: net_udp_ip_output (proto 17, src 0.0.0.0 ได้, broadcast ได้)
+        + dispatcher proto 17 → udp_receive_packet
+      └─ CLI: udpbind / udpsend <ip> <port> <text> / udprecv / udpclose
+      └─ Verified: datagram จาก guest ถึง host UDP listener ผ่าน slirp
+      └─ ยังไม่ทำ: unified socket API + socket fd model (Phase 52)
 
-    Phase 51: DHCP + DNS Client ⬜ PLANNED
-      └─ DHCP discover/offer/request/ack flow (UDP 67/68)
-      └─ Auto-configure IP, subnet mask, gateway, DNS server
-      └─ DNS query (UDP 53) — A record resolution
-      └─ /etc/resolv.conf equivalent in VernisFS config
-      └─ CLI: `dhcp`, `nslookup <hostname>`
+    Phase 51: DHCP + DNS Client ✅ DONE (2026-07-03)
+      └─ DHCP DORA เต็ม (RFC 2131 minimal): DISCOVER/OFFER/REQUEST/ACK, xid match,
+        broadcast + src 0.0.0.0, retry 3 ครั้ง, parse mask/router/dns options
+      └─ kernel_net_apply_config(): อัปเดต net_ip/net_gw + TCP/UDP local ip + DNS server
+      └─ DNS A-record query (UDP 53): QNAME encode, compression-pointer skip, retry
+      └─ Default DNS 10.0.2.3 (slirp) ตั้งแต่ boot; DHCP override ได้
+      └─ CLI: `dhcp` (แสดง lease), `nslookup <host>`
+      └─ Verified ทั้ง x86+x64: lease 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3 จาก slirp;
+        nslookup example.com → IP จริงจาก internet ผ่าน host resolver
+      └─ หมายเหตุ: พบและแก้ bug cli_printf ไม่รองรับ %u (กระทบ tcpstat เดิมด้วย)
 
     Phase 52: Userspace Socket API ⬜ PLANNED
       └─ SYS_SOCKET / SYS_BIND / SYS_LISTEN / SYS_ACCEPT / SYS_CONNECT
@@ -610,10 +617,14 @@ Phase 28: Shell Pipeline Support ✅ DONE
         └─ ผลวัด (x64@1080p): typing 11-14 ticks (เดิม ~56), winmove layout compose
           ~29 ticks, boot compose 42 (เดิม 199); x86: typing 13-16
         └─ Known: PS/2 stream อาจ desync กับ synthetic input (บาง packet หาย) —
-          mouse จริงใช้งานได้; 9-bit sign bits (flags bit 4/5) ยังไม่ handle ใน
-          mouse_irq_handler (delta >127 จะเพี้ยน)
+          mouse จริงใช้งานได้; 9-bit sign bits แก้แล้ว (2026-07-03): mouse_irq_handler
+          อ่าน sign จาก flags bit 4/5, FFI ขยายเป็น i32
 
-    Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — audit 2026-07-02: มี userlib/getty.c + login.c + Makefile rules + mkfs support จริง แต่ syscalls SETUID/GETUID/CHDIR/GETCWD/UMASK (79–85) ไม่มีใน kernel (syscall สูงสุดคือ SYS_SYNC=78)
+    Phase 60: Multiuser (getty/login) ⚠️ PARTIAL — syscalls ครบแล้ว (2026-07-03):
+      SYS_SETUID(79)/SETGID(80)/GETUID(81)/GETGID(82)/CHDIR(83)/GETCWD(84)/UMASK(85)
+      ทั้ง x86+x64 + per-task uid/gid/umask/cwd (inherit ผ่าน fork) + userlib wrappers;
+      setuid/setgid เฉพาะ root เปลี่ยนได้, chdir ตรวจ path กับ VFS
+      └─ ยังเหลือ: getty/login ยังไม่เรียกใช้ syscalls เหล่านี้ (boot ยัง launch vsh ตรง)
       └─ /sbin/getty: display login prompt, fork + exec /bin/login
       └─ /bin/login: authenticate against /etc/shadow, setuid, exec shell
       └─ setuid / setgid syscalls (SYS_SETUID=79, SYS_SETGID=80)
