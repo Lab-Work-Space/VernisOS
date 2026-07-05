@@ -1,0 +1,355 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1980" viewBox="0 0 1700 1980" font-family="'Segoe UI',Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#455a64"/>
+    </marker>
+    <marker id="arb" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2e6fb0"/>
+    </marker>
+    <style>
+      .h    { font-size:19px; font-weight:700; }
+      .bt   { font-size:14px; font-weight:700; fill:#1f2933; }
+      .bs   { font-size:10.5px; fill:#3a4750; }
+      .tiny { font-size:9.5px; fill:#52616b; }
+      .box  { rx:9; ry:9; stroke-width:1.6; }
+      .band { rx:14; ry:14; opacity:0.30; }
+      .stg  { rx:7; ry:7; stroke-width:1.4; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1700" height="1980" fill="#f6f7fb"/>
+
+  <!-- TITLE -->
+  <text x="40" y="52" font-size="30" font-weight="800" fill="#161a2e">VernisOS — Full Architecture</text>
+  <text x="40" y="80" font-size="14" fill="#5a6473">bare-metal microkernel · x86 + x86_64 from one 4MB os.img · in-kernel Rust AI engine · language split: NASM · C · Rust no_std · Python tooling</text>
+  <text x="1660" y="52" text-anchor="end" font-size="13" fill="#8a94a3">v0.1.0-dev · make all → os.img (bare `make` builds syscall.o, NOT all)</text>
+
+  <!-- ================= DISK IMAGE ================= -->
+  <rect class="band" x="24" y="100" width="1652" height="104" fill="#b0bec5"/>
+  <text class="h" x="40" y="126" fill="#455a64">Disk image · os.img (4 MB, sector-based)</text>
+  <g>
+    <rect x="40"   y="138" width="150" height="40" fill="#eceff1" stroke="#607d8b" stroke-width="1.4"/>
+    <text class="tiny" x="115" y="154" text-anchor="middle" font-weight="700">Sector 0</text>
+    <text class="tiny" x="115" y="169" text-anchor="middle">Stage 1 (MBR)</text>
+
+    <rect x="190"  y="138" width="200" height="40" fill="#e8eef2" stroke="#607d8b" stroke-width="1.4"/>
+    <text class="tiny" x="290" y="154" text-anchor="middle" font-weight="700">Sectors 1–6</text>
+    <text class="tiny" x="290" y="169" text-anchor="middle">Stage 2 (A20 · GDT · route)</text>
+
+    <rect x="390"  y="138" width="200" height="40" fill="#e8eef2" stroke="#607d8b" stroke-width="1.4"/>
+    <text class="tiny" x="490" y="154" text-anchor="middle" font-weight="700">Sectors 7–12</text>
+    <text class="tiny" x="490" y="169" text-anchor="middle">Stage 3 (PAE · PML4 · long mode)</text>
+
+    <rect x="590"  y="138" width="300" height="40" fill="#e7f0fb" stroke="#2e6fb0" stroke-width="1.4"/>
+    <text class="tiny" x="740" y="154" text-anchor="middle" font-weight="700">Sectors 13+</text>
+    <text class="tiny" x="740" y="169" text-anchor="middle">x86 kernel binary</text>
+
+    <rect x="890"  y="138" width="320" height="40" fill="#e7f0fb" stroke="#2e6fb0" stroke-width="1.4"/>
+    <text class="tiny" x="1050" y="154" text-anchor="middle" font-weight="700">Sector 2048</text>
+    <text class="tiny" x="1050" y="169" text-anchor="middle">x64 kernel binary</text>
+
+    <rect x="1210" y="138" width="220" height="40" fill="#fdecea" stroke="#c0392b" stroke-width="1.4"/>
+    <text class="tiny" x="1320" y="154" text-anchor="middle" font-weight="700">Sector 4096</text>
+    <text class="tiny" x="1320" y="169" text-anchor="middle">Policy blob (VPOL)</text>
+
+    <rect x="1430" y="138" width="230" height="40" fill="#efebe9" stroke="#8d6e63" stroke-width="1.4"/>
+    <text class="tiny" x="1545" y="154" text-anchor="middle" font-weight="700">Sector 5120</text>
+    <text class="tiny" x="1545" y="169" text-anchor="middle">VernisFS image</text>
+  </g>
+  <text class="tiny" x="40" y="196">CPUID arch detection in Stage 1 → flag stored at 0x7FF0 → Stage 2 routes to x86 (protected mode) or x64 (Stage 3 → long mode)</text>
+
+  <!-- ================= BOOT CHAIN ================= -->
+  <rect class="band" x="24" y="216" width="1652" height="168" fill="#fad7a0"/>
+  <text class="h" x="40" y="242" fill="#b9770e">Boot chain (boot/ · NASM)</text>
+  <g>
+    <rect class="box" x="40"  y="284" width="240" height="46" fill="#fff4e6" stroke="#e67e22"/>
+    <text class="bt" x="56" y="304" font-size="12.5">Stage 1 · stage1.asm</text>
+    <text class="tiny" x="56" y="322">real mode · CPUID → 0x7FF0</text>
+
+    <rect class="box" x="312" y="284" width="240" height="46" fill="#fff4e6" stroke="#e67e22"/>
+    <text class="bt" x="328" y="304" font-size="12.5">Stage 2 · stage2.asm</text>
+    <text class="tiny" x="328" y="322">A20 · GDT · reads arch flag</text>
+
+    <rect class="box" x="588" y="256" width="330" height="42" fill="#fff4e6" stroke="#e67e22"/>
+    <text class="bt" x="604" y="274" font-size="12.5">x64 · Stage 3 · stage3.asm</text>
+    <text class="tiny" x="604" y="290">PAE · PML4 paging · enter long mode @0x90000</text>
+
+    <rect class="box" x="950" y="256" width="330" height="42" fill="#e7f0fb" stroke="#2e6fb0"/>
+    <text class="bt" x="966" y="274" font-size="12.5">x64 kernel @0x100000</text>
+    <text class="tiny" x="966" y="290">kernel_x64.c · SYSCALL/SYSRET · E1000</text>
+
+    <rect class="box" x="588" y="316" width="330" height="42" fill="#fff4e6" stroke="#e67e22"/>
+    <text class="bt" x="604" y="334" font-size="12.5">x86 · protected mode (direct)</text>
+    <text class="tiny" x="604" y="350">Stage 2 → PM, no Stage 3</text>
+
+    <rect class="box" x="950" y="316" width="330" height="42" fill="#e7f0fb" stroke="#2e6fb0"/>
+    <text class="bt" x="966" y="334" font-size="12.5">x86 kernel @1 MB</text>
+    <text class="tiny" x="966" y="350">kernel_x86.c · IDT · int 0x80</text>
+
+    <rect class="box" x="1312" y="284" width="348" height="46" fill="#eceff1" stroke="#546e7a"/>
+    <text class="bt" x="1328" y="304" font-size="12.5">→ kernel_main() (per arch)</text>
+    <text class="tiny" x="1328" y="322">init subsystems · load policy · mount VernisFS · start init</text>
+  </g>
+  <line x1="280" y1="307" x2="312" y2="307" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+  <path d="M552,300 L570,300 L570,277 L588,277" fill="none" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+  <path d="M552,314 L570,314 L570,337 L588,337" fill="none" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="918" y1="277" x2="950" y2="277" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="918" y1="337" x2="950" y2="337" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+  <path d="M1280,277 L1296,277 L1296,300 L1312,300" fill="none" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+  <path d="M1280,337 L1296,337 L1296,314 L1312,314" fill="none" stroke="#455a64" stroke-width="1.6" marker-end="url(#ar)"/>
+
+  <!-- ================= KERNEL ================= -->
+  <rect class="band" x="24" y="396" width="1652" height="648" fill="#c5cbd3"/>
+  <text class="h" x="40" y="422" fill="#37474f">Kernel — core in Rust no_std, subsystems in C  <tspan font-size="12" font-weight="400" fill="#546e7a">(one direction: C calls Rust; rust_shims.c provides the reverse)</tspan></text>
+
+  <!-- Rust core panel -->
+  <rect class="box" x="40" y="436" width="527" height="212" fill="#fbe9e0" stroke="#ce5c2f"/>
+  <text class="bt" x="56" y="460">Rust core · kernel/core/verniskernel/src</text>
+  <text class="bs" x="56" y="480">scheduler.rs — round-robin preemptive · PCB · priority · signals</text>
+  <text class="bs" x="56" y="498">memory.rs — buddy_system_allocator · 8 MB heap</text>
+  <text class="bs" x="56" y="516">syscall.rs — Rust-side dispatch helpers</text>
+  <text class="bs" x="56" y="534">console.rs — VGA text · framebuffer.rs — auto-res VBE LFB</text>
+  <text class="bs" x="56" y="552">font8x16.rs · mouse.rs — PS/2 pointer</text>
+  <text class="bs" x="56" y="570">module_registry.rs — kernel module registry</text>
+  <text class="bs" x="56" y="588">lib.rs → libvernisos.a (x86) / libvernisos_x64.a (x64)</text>
+  <text class="tiny" x="56" y="612">build: cargo +nightly -Zbuild-std=core,alloc · i386.json / x86_64-unknown-none</text>
+  <text class="tiny" x="56" y="630">rebuild via `make rust` only when src/ changes (runs cargo clean)</text>
+
+  <!-- Rust AI panel -->
+  <rect class="box" x="583" y="436" width="527" height="212" fill="#efeaf9" stroke="#7e57c2"/>
+  <text class="bt" x="599" y="460">Rust AI engine · src/ai (8 modules)</text>
+  <text class="bs" x="599" y="480">event_store.rs — EventStore ring buffer</text>
+  <text class="bs" x="599" y="498">anomaly_detector.rs — rate / pattern / threshold</text>
+  <text class="bs" x="599" y="516">process_tracker.rs — per-PID trust scoring</text>
+  <text class="bs" x="599" y="534">alert_dedup.rs — AlertDeduplicator</text>
+  <text class="bs" x="599" y="552">response_handler.rs — ResponseHandler</text>
+  <text class="bs" x="599" y="570">auto_tuner.rs — load → scheduler quantum</text>
+  <text class="bs" x="599" y="588">policy.rs — PolicyEngine · types.rs · mod.rs</text>
+  <text class="tiny" x="599" y="612">primary AI engine · called from C via kernel/drivers/ai_engine.c FFI</text>
+  <text class="tiny" x="599" y="630">callbacks tune scheduler quantum / priority · trust gating</text>
+
+  <!-- Rust GUI panel -->
+  <rect class="box" x="1126" y="436" width="534" height="212" fill="#e0f2f1" stroke="#00838f"/>
+  <text class="bt" x="1142" y="460">Rust GUI · src/gui (glassmorphism)</text>
+  <text class="bs" x="1142" y="480">compositor.rs — real backdrop blur · damage tracking</text>
+  <text class="bs" x="1142" y="498">window.rs — window manager · desktop.rs</text>
+  <text class="bs" x="1142" y="516">terminal.rs — terminal widget · widgets.rs</text>
+  <text class="bs" x="1142" y="534">cursor.rs · event.rs · render cadence @240 Hz timer</text>
+  <text class="tiny" x="1142" y="558">buffers NOT heap-allocated — fixed identity-mapped regions:</text>
+  <text class="tiny" x="1142" y="574">back buffer @48 MB · wallpaper @56 MB · glass-base @64 MB (needs ≥72 MB)</text>
+  <text class="tiny" x="1142" y="592">typing restores cached glass base · drag = tint-only, re-frost on drop</text>
+  <text class="tiny" x="1142" y="608">telemetry: [gui] slow compose ticks=N path=P on serial</text>
+  <text class="tiny" x="1142" y="626">rust_shims memcpy/memset use rep movsq/stosq (not byte loops)</text>
+
+  <!-- FFI bar -->
+  <rect x="40" y="660" width="1620" height="34" rx="8" fill="#37474f"/>
+  <text x="850" y="682" text-anchor="middle" font-size="12.5" font-weight="700" fill="#fff">C ↔ Rust FFI — Rust exports #[no_mangle] extern "C" (scheduler_* · fb_/console_/gui_* · ai_engine_*) · kernel/shims/rust_shims.c back-fills Rust runtime symbols (__rust_alloc, rust_begin_unwind…)</text>
+
+  <!-- C subsystems -->
+  <text class="bt" x="40" y="718" font-size="15" fill="#2e6fb0">Kernel subsystems · C (kernel/)  —  all include/*.h shared between x86 &amp; x64 (-I include)</text>
+  <g>
+    <!-- row 1 -->
+    <rect class="box" x="40"   y="728" width="393" height="92" fill="#e7f0fb" stroke="#2e6fb0"/>
+    <text class="bt" x="56" y="750" font-size="13">arch/x86 · arch/x86_64</text>
+    <text class="bs" x="56" y="768">kernel_x86.c — IDT · int 0x80</text>
+    <text class="bs" x="56" y="784">kernel_x64.c — SYSCALL/SYSRET · E1000 NIC</text>
+    <text class="tiny" x="56" y="802">interrupts.asm · syscall.asm per arch</text>
+
+    <rect class="box" x="449"  y="728" width="393" height="92" fill="#e7f0fb" stroke="#2e6fb0"/>
+    <text class="bt" x="465" y="750" font-size="13">drivers/</text>
+    <text class="bs" x="465" y="768">ai_bridge.c — COM2 ↔ Python AI</text>
+    <text class="bs" x="465" y="784">ai_engine.c — Rust AI FFI wrappers</text>
+    <text class="tiny" x="465" y="802">acpi.c</text>
+
+    <rect class="box" x="858"  y="728" width="393" height="92" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="874" y="750" font-size="13">fs/</text>
+    <text class="bs" x="874" y="768">vfs.c · vernisfs.c · bcache.c (LRU 64×512B)</text>
+    <text class="bs" x="874" y="784">fat32.c · ext2.c · ntfs.c — stubs only</text>
+    <text class="tiny" x="874" y="802">VernisFS: sector-based, max 32 files</text>
+
+    <rect class="box" x="1267" y="728" width="393" height="92" fill="#fdecea" stroke="#c0392b"/>
+    <text class="bt" x="1283" y="750" font-size="13">security/</text>
+    <text class="bs" x="1283" y="768">policy_loader.c · policy_enforce.c · sandbox.c</text>
+    <text class="bs" x="1283" y="784">userdb.c · sha256.c · auditlog.c</text>
+    <text class="tiny" x="1283" y="802">full security stack · privilege by user</text>
+
+    <!-- row 2 -->
+    <rect class="box" x="40"   y="832" width="393" height="92" fill="#e8f5e9" stroke="#2e7d32"/>
+    <text class="bt" x="56" y="854" font-size="13">net/</text>
+    <text class="bs" x="56" y="872">tcp.c — handshake/data/close · RFC 793 cksum</text>
+    <text class="bs" x="56" y="888">udp.c — 8 sockets · DHCP (DORA) · DNS</text>
+    <text class="tiny" x="56" y="906">no sliding window / data retransmit / OOO reassembly</text>
+
+    <rect class="box" x="449"  y="832" width="393" height="92" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="465" y="854" font-size="13">ipc/</text>
+    <text class="bs" x="465" y="872">ipc.c — mailbox layer</text>
+    <text class="bs" x="465" y="888">+ Unix socket layer</text>
+    <text class="tiny" x="465" y="906">module ↔ module · kernel ↔ AI</text>
+
+    <rect class="box" x="858"  y="832" width="393" height="92" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="874" y="854" font-size="13">shell/</text>
+    <text class="bs" x="874" y="872">cli.c — ~30 built-in commands</text>
+    <text class="bs" x="874" y="888">pipe support · privilege-gated</text>
+    <text class="tiny" x="874" y="906">owns serial line until `console` hands off</text>
+
+    <rect class="box" x="1267" y="832" width="393" height="92" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="1283" y="854" font-size="13">module/</text>
+    <text class="bs" x="1283" y="872">module.c — dynamic module loading</text>
+    <text class="bs" x="1283" y="888">dylib.c — dynamic linking</text>
+    <text class="tiny" x="1283" y="906">runtime load/unload + permissions</text>
+
+    <!-- row 3 -->
+    <rect class="box" x="40"   y="936" width="393" height="88" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="56" y="958" font-size="13">shims/</text>
+    <text class="bs" x="56" y="976">rust_shims.c — C stubs for Rust runtime</text>
+    <text class="tiny" x="56" y="996">memcpy/memset via rep movsq/stosq (TCG-fast)</text>
+
+    <rect class="box" x="449"  y="936" width="393" height="88" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="465" y="958" font-size="13">log/</text>
+    <text class="bs" x="465" y="976">klog — structured kernel logging</text>
+    <text class="tiny" x="465" y="996">+ audit log for security events</text>
+
+    <rect class="box" x="858"  y="936" width="393" height="88" fill="#eef2f7" stroke="#4a6b8a"/>
+    <text class="bt" x="874" y="958" font-size="13">selftest/</text>
+    <text class="bs" x="874" y="976">boot-time self-test harness</text>
+    <text class="tiny" x="874" y="996">exercised by the Python integration tests</text>
+
+    <rect class="box" x="1267" y="936" width="393" height="88" fill="#eceff1" stroke="#546e7a"/>
+    <text class="bt" x="1283" y="958" font-size="13">FFI-only headers</text>
+    <text class="bs" x="1283" y="976">memory_base.h · scheduler_base.h</text>
+    <text class="tiny" x="1283" y="996">syscall_base.h — declarations, no .c impl</text>
+  </g>
+
+  <!-- ================= STORAGE + NETWORK ================= -->
+  <rect class="band" x="24" y="1056" width="1652" height="322" fill="#cfd8dc"/>
+  <!-- storage -->
+  <rect class="box" x="40" y="1068" width="790" height="298" fill="#efebe9" stroke="#8d6e63"/>
+  <text class="bt" x="56" y="1092">VFS / Storage stack</text>
+  <g>
+    <rect class="stg" x="120" y="1104" width="630" height="34" fill="#f5f0ee" stroke="#8d6e63"/>
+    <text class="bs" x="435" y="1126" text-anchor="middle" font-weight="700">CLI · Syscall</text>
+    <rect class="stg" x="120" y="1152" width="630" height="34" fill="#f5f0ee" stroke="#8d6e63"/>
+    <text class="bs" x="435" y="1174" text-anchor="middle">kfs_*() — VFS abstraction (kernel/fs/vfs.c)</text>
+    <rect class="stg" x="120" y="1200" width="630" height="34" fill="#f5f0ee" stroke="#8d6e63"/>
+    <text class="bs" x="435" y="1222" text-anchor="middle">bcache — LRU write-back, 64 × 512 B blocks</text>
+    <rect class="stg" x="120" y="1248" width="630" height="34" fill="#f5f0ee" stroke="#8d6e63"/>
+    <text class="bs" x="435" y="1270" text-anchor="middle">Backend: NVMe &gt; AHCI &gt; ATA PIO (auto-detected at boot)</text>
+    <rect class="stg" x="120" y="1296" width="630" height="34" fill="#efe4d8" stroke="#8d6e63"/>
+    <text class="bs" x="435" y="1318" text-anchor="middle" font-weight="700">VernisFS on disk — sector-based · 32 files max (10 used)</text>
+    <text class="tiny" x="435" y="1350" text-anchor="middle">writes flow down; auto-detected block backend feeds VernisFS</text>
+    <line x1="435" y1="1138" x2="435" y2="1152" stroke="#8d6e63" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="435" y1="1186" x2="435" y2="1200" stroke="#8d6e63" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="435" y1="1234" x2="435" y2="1248" stroke="#8d6e63" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="435" y1="1282" x2="435" y2="1296" stroke="#8d6e63" stroke-width="1.5" marker-end="url(#ar)"/>
+  </g>
+  <!-- network -->
+  <rect class="box" x="870" y="1068" width="790" height="298" fill="#e8f5e9" stroke="#2e7d32"/>
+  <text class="bt" x="886" y="1092">Network stack · Intel E1000 (82540EM)</text>
+  <g>
+    <rect class="stg" x="950" y="1104" width="630" height="38" fill="#f1f8f2" stroke="#2e7d32"/>
+    <text class="bs" x="1265" y="1122" text-anchor="middle" font-weight="700">E1000 driver — e1000_send/recv (static in each arch kernel)</text>
+    <text class="tiny" x="1265" y="1136" text-anchor="middle">RX ring drained by the 240 Hz timer IRQ</text>
+    <rect class="stg" x="950" y="1156" width="630" height="34" fill="#f1f8f2" stroke="#2e7d32"/>
+    <text class="bs" x="1265" y="1178" text-anchor="middle">timer IRQ → net_rx_poll() → net_dispatch_frame()</text>
+    <rect class="stg" x="950" y="1204" width="630" height="52" fill="#f1f8f2" stroke="#2e7d32"/>
+    <text class="bs" x="1265" y="1224" text-anchor="middle" font-weight="700">ARP · ICMP echo · TCP · UDP</text>
+    <text class="tiny" x="1265" y="1240" text-anchor="middle">TCP: handshake/data/close, RFC 793 cksum · UDP: 8 sockets, DHCP DORA, DNS A-record</text>
+    <rect class="stg" x="950" y="1270" width="630" height="52" fill="#eef7ef" stroke="#2e7d32"/>
+    <text class="bs" x="1265" y="1290" text-anchor="middle" font-weight="700">Userland sockets = file descriptors (Phase 52)</text>
+    <text class="tiny" x="1265" y="1306" text-anchor="middle">SYS_SOCKET/CONNECT/BIND → read/write/close · userlib/netcat.c demo</text>
+    <text class="tiny" x="886" y="1350">arch-agnostic tcp.c/udp.c register net_tcp_ip_output() at boot · never call blocking arp_resolve from IRQ</text>
+    <line x1="1265" y1="1142" x2="1265" y2="1156" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="1265" y1="1190" x2="1265" y2="1204" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="1265" y1="1256" x2="1265" y2="1270" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#ar)"/>
+  </g>
+
+  <!-- ================= SECURITY/POLICY + AI ================= -->
+  <rect class="band" x="24" y="1390" width="1652" height="212" fill="#cfd8dc"/>
+  <!-- policy -->
+  <rect class="box" x="40" y="1402" width="790" height="188" fill="#fdecea" stroke="#c0392b"/>
+  <text class="bt" x="56" y="1426">Security · Policy pipeline</text>
+  <g font-size="10.5">
+    <rect class="stg" x="56" y="1440" width="150" height="40" fill="#fff5f4" stroke="#c0392b"/>
+    <text class="bs" x="131" y="1458" text-anchor="middle" font-weight="700">policy.yaml</text>
+    <text class="tiny" x="131" y="1472" text-anchor="middle">ai/config/</text>
+    <rect class="stg" x="240" y="1440" width="170" height="40" fill="#fff5f4" stroke="#c0392b"/>
+    <text class="bs" x="325" y="1458" text-anchor="middle" font-weight="700">policy_compile.py</text>
+    <text class="tiny" x="325" y="1472" text-anchor="middle">YAML → VPOL binary</text>
+    <rect class="stg" x="444" y="1440" width="170" height="40" fill="#fff5f4" stroke="#c0392b"/>
+    <text class="bs" x="529" y="1458" text-anchor="middle" font-weight="700">VPOL @ sector 4096</text>
+    <text class="tiny" x="529" y="1472" text-anchor="middle">embedded in os.img</text>
+    <rect class="stg" x="648" y="1440" width="166" height="40" fill="#fff5f4" stroke="#c0392b"/>
+    <text class="bs" x="731" y="1458" text-anchor="middle" font-weight="700">policy_loader.c</text>
+    <text class="tiny" x="731" y="1472" text-anchor="middle">parses at boot</text>
+    <line x1="206" y1="1460" x2="240" y2="1460" stroke="#c0392b" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="410" y1="1460" x2="444" y2="1460" stroke="#c0392b" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="614" y1="1460" x2="648" y2="1460" stroke="#c0392b" stroke-width="1.5" marker-end="url(#ar)"/>
+  </g>
+  <text class="bs" x="56" y="1512">enforcement: policy_enforce.c · sandbox.c · userdb.c · sha256.c · auditlog.c</text>
+  <text class="tiny" x="56" y="1532">COM2 hot-reload supported · SHA-256 user auth · privilege tiers root / admin / user</text>
+  <text class="tiny" x="56" y="1552">the in-kernel Rust PolicyEngine (src/ai/policy.rs) enforces at runtime against loaded rules</text>
+  <!-- AI integration -->
+  <rect class="box" x="870" y="1402" width="790" height="188" fill="#efeaf9" stroke="#7e57c2"/>
+  <text class="bt" x="886" y="1426">AI integration</text>
+  <rect class="stg" x="886" y="1440" width="758" height="58" fill="#f5f1fc" stroke="#7e57c2"/>
+  <text class="bs" x="902" y="1460" font-weight="700">In-kernel (primary) — Rust AI engine via kernel/drivers/ai_engine.c FFI</text>
+  <text class="tiny" x="902" y="1478">anomaly detection · scheduler quantum auto-tuning · per-PID trust scoring · policy enforcement</text>
+  <text class="tiny" x="902" y="1492">no Python / COM2 dependency for the primary path</text>
+  <rect class="stg" x="886" y="1508" width="758" height="54" fill="#f0ecf9" stroke="#7e57c2"/>
+  <text class="bs" x="902" y="1528" font-weight="700">External (dev/test) — ai_listener.py on TCP 4444</text>
+  <text class="tiny" x="902" y="1546">kernel sends events over COM2 serial (kernel/drivers/ai_bridge.c) · `make run64-ai`</text>
+  <text class="tiny" x="886" y="1582">policy flow: edit ai/config/policy.yaml → policy_compile.py → VPOL @4096 → policy_loader.c at boot</text>
+
+  <!-- ================= USER SPACE ================= -->
+  <rect class="band" x="24" y="1614" width="1652" height="188" fill="#bbdefb"/>
+  <text class="h" x="40" y="1640" fill="#1565c0">User space (userlib/ · bare-metal cross-compilers, no libc)</text>
+  <g font-size="11">
+    <rect class="stg" x="40"  y="1652" width="150" height="40" fill="#e3f2fd" stroke="#1565c0"/>
+    <text class="bs" x="115" y="1670" text-anchor="middle" font-weight="700">/sbin/init</text>
+    <text class="tiny" x="115" y="1684" text-anchor="middle">first user process</text>
+    <rect class="stg" x="222" y="1652" width="160" height="40" fill="#e3f2fd" stroke="#1565c0"/>
+    <text class="bs" x="302" y="1670" text-anchor="middle" font-weight="700">/sbin/getty</text>
+    <text class="tiny" x="302" y="1684" text-anchor="middle">banner</text>
+    <rect class="stg" x="414" y="1652" width="230" height="40" fill="#e3f2fd" stroke="#1565c0"/>
+    <text class="bs" x="529" y="1670" text-anchor="middle" font-weight="700">/bin/login — SYS_AUTH(90)</text>
+    <text class="tiny" x="529" y="1684" text-anchor="middle">/etc/shadow · SHA-256 → uid</text>
+    <rect class="stg" x="676" y="1652" width="200" height="40" fill="#e3f2fd" stroke="#1565c0"/>
+    <text class="bs" x="776" y="1670" text-anchor="middle" font-weight="700">setuid/gid · mkdir home</text>
+    <text class="tiny" x="776" y="1684" text-anchor="middle">SYS_MKDIR2(91) · chdir</text>
+    <rect class="stg" x="908" y="1652" width="150" height="40" fill="#e3f2fd" stroke="#1565c0"/>
+    <text class="bs" x="983" y="1670" text-anchor="middle" font-weight="700">/bin/vsh</text>
+    <text class="tiny" x="983" y="1684" text-anchor="middle">user shell</text>
+    <line x1="190" y1="1672" x2="222" y2="1672" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arb)"/>
+    <line x1="382" y1="1672" x2="414" y2="1672" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arb)"/>
+    <line x1="644" y1="1672" x2="676" y2="1672" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arb)"/>
+    <line x1="876" y1="1672" x2="908" y2="1672" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arb)"/>
+
+    <rect class="box" x="1090" y="1652" width="570" height="40" fill="#e3f2fd" stroke="#1565c0"/>
+    <text class="bs" x="1106" y="1670" font-weight="700">Per-process address spaces</text>
+    <text class="tiny" x="1106" y="1684">TaskSlot.pml4 (x64) / .pd (x86) · CR3 switched on ctx-switch/execve/exit/kill</text>
+  </g>
+  <text class="bs" x="40" y="1720">crt0_{x86,x64}.asm: _start → main() → SYS_EXIT · syscall wrappers in userlib/syscall.h (int 0x80 both arches)</text>
+  <text class="bs" x="40" y="1740">elf_exec/execve build into a fresh space, free the old after switching CR3 · fork deep-copies mapped pages (not CoW) · frames via free-list</text>
+  <text class="tiny" x="40" y="1760">load addrs: code @0x10000000 · mmap @0x20000000 (x64) / 0x30000000 (x86) · console handoff via g_tty_console · seeded users: root / admin / user</text>
+  <text class="tiny" x="40" y="1778">programs: init.c · getty.c · login.c · vsh.c · netcat.c · libc.c · add one → new userlib/*.c + Makefile rules + mkfs_vernis.py --flag</text>
+
+  <!-- ================= PYTHON TOOLING ================= -->
+  <rect class="band" x="24" y="1814" width="1652" height="132" fill="#f9e79f"/>
+  <text class="h" x="40" y="1840" fill="#b7950b">Python host tooling (ai/) — build-time &amp; test, runs on the developer machine</text>
+  <g>
+    <rect class="box" x="40"   y="1850" width="527" height="82" fill="#fef9e7" stroke="#d4ac0d"/>
+    <text class="bt" x="56" y="1874">Build tools · ai/tools/</text>
+    <text class="bs" x="56" y="1894">policy_compile.py — policy.yaml → make/policy.bin (VPOL)</text>
+    <text class="bs" x="56" y="1912">mkfs_vernis.py — assemble VernisFS image (vsh/getty/login…)</text>
+
+    <rect class="box" x="583"  y="1850" width="527" height="82" fill="#fef9e7" stroke="#d4ac0d"/>
+    <text class="bt" x="599" y="1874">Python AI engine · ai/</text>
+    <text class="bs" x="599" y="1894">ai_listener.py :4444 · corelib.py · config_loader.py</text>
+    <text class="bs" x="599" y="1912">anomaly_detector · process_tracker · auto_tuner (dev mirror)</text>
+
+    <rect class="box" x="1126" y="1850" width="534" height="82" fill="#fef9e7" stroke="#d4ac0d"/>
+    <text class="bt" x="1142" y="1874">Integration tests · ai/tests/</text>
+    <text class="bs" x="1142" y="1894">test_integration.py --arch x64 --img os.img (QEMU + serial)</text>
+    <text class="bs" x="1142" y="1912">test_cli_permission.py · `make test` / `make test-all`</text>
+  </g>
+</svg>
