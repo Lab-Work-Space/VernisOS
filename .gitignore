@@ -1,0 +1,112 @@
+# ==========================================
+# 1. Claude / Agent Configuration & Rules
+# ==========================================
+# Ignore local runtime cache/history for Claude, but keep team rules and agent prompts
+.claude/
+CLAUDE.md
+
+# ==========================================
+# 2. Environment & Sensitive Data (Security Rules)
+# ==========================================
+*.env
+*.env.local
+*.env.*.local
+*.pem
+*.key
+*.cert
+*.p12
+
+# ==========================================
+# 3. Databases & Logs
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================================
+# 4. Editors & IDEs
+# ==========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*.tmp
+*.backup
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+*.iml
+
+# ==========================================
+# 5. Python & Virtual Environments
+# ==========================================
+.pycache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# 6. Node.js & Frontend (For UX/UI & Web SubAgents)
+# ==========================================
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.vuepress/dist/
+.cache/
+.parcel-cache/
+*.tsbuildinfo
+
+# ==========================================
+# 7. Low-Level / Kernel / Embedded / Rust Outputs
+# ==========================================
+kernel/core/verniskernel/target/
+target/
+make/
+lib/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.elf
+*.bin
+*.class
+*.jar
+*.war
+*.ear
+*.img
+.qemu
+.targets
+.commit/
+
+# ==========================================
+# 8. Testing & QA Artifacts (For Tester/QA SubAgents)
+# ==========================================
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# ==========================================
+# 9. Documentation & Generated Files
+# ==========================================
+docs/superpowers/
